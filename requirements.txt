@@ -1,0 +1,21 @@
+# Limitless Cognitive Wellness Platform
+# Python 3.12+
+
+# --- API Framework ---
+fastapi
+uvicorn[standard]           # ASGI server to run the app
+
+# --- Validation ---
+pydantic
+# --- Testing ---
+pytest
+httpx2
+reportlab
+# --- Future: PDF Generation (uncomment when building /generate-pdf) ---
+# playwright                # Headless browser for HTML → PDF
+# jinja2                    # HTML templating for PDF reports
+
+# --- Future: AI Narrative (uncomment when integrating Claude API) ---
+# anthropic                 # Claude API client
+google-genai
+python-dotenv
