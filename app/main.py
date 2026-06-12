@@ -32,7 +32,9 @@ app.include_router(analyze_router,   prefix=API_PREFIX)
 app.include_router(questions_router, prefix=API_PREFIX)
 app.include_router(pdf_router,       prefix=API_PREFIX)
 
-
+@app.get("/")
+async def root():
+    return {"status": "ok"}
 @app.get("/health")
 async def health():
     return {
