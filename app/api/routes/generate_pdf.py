@@ -23,7 +23,7 @@ async def generate_pdf(request: GeneratePDFRequest) -> Response:
     try:
 
         pdf_bytes = build_report(
-            analysis=request.analysis,
+            analysis=request.analysis.model_dump(),
             brand=request.brand.model_dump()
             if request.brand
             else {}
