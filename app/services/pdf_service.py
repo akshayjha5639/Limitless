@@ -14,7 +14,9 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 from reportlab.platypus import Paragraph
 from reportlab.lib.styles import ParagraphStyle
-
+from io import BytesIO
+from reportlab.lib.pagesizes import A4
+from app.services.report_mapper import transform_analysis_to_report
 # ============================================================
 # PAGE CONFIG
 # ============================================================
@@ -1866,25 +1868,94 @@ def wrap_text_in_box(c, text, x, y, width, font_size, line_height=14,
 # BUILD REPORT
 # ============================================================
 
-def build_report(data, output_file="limitless_premium_report.pdf"):
-    c = canvas.Canvas(output_file, pagesize=A4)
-    c.setTitle("Limitless Cognitive Wellness Report")
-    c.setAuthor("Limitless AI")
-    c.setSubject(f"Cognitive Wellness Assessment — {data['user']['name']}")
 
-    draw_cover_page(c, data);         c.showPage()
-    draw_executive_summary(c, data);  c.showPage()
-    draw_brain_analysis(c, data);     c.showPage()
-    draw_lifestyle_page(c, data);     c.showPage()
-    draw_ai_insights_page(c, data);   c.showPage()
-    draw_wellness_page(c, data);      c.showPage()
-    draw_strengths_page(c, data);     c.showPage()
-    draw_roadmap_page(c, data);       c.showPage()
-    draw_cognitive_age_page(c, data); c.showPage()
-    draw_legal_page(c, data);         c.showPage()
+def build_report(analysis,brand=None):
+
+    # ============================================
+    # Transform analysis -> PDF report structure
+    # ============================================
+
+    data = transform_analysis_to_report(
+        analysis
+    )
+
+    # ============================================
+    # Create in-memory buffer
+    # ============================================
+
+    buffer = BytesIO()
+
+    # ============================================
+    # Create PDF canvas
+    # ============================================
+
+    c = canvas.Canvas(
+        buffer,
+        pagesize=A4
+    )
+
+    c.setTitle(
+        "Limitless Cognitive Wellness Report"
+    )
+
+    c.setAuthor(
+        "Limitless AI"
+    )
+
+    c.setSubject(
+        f"Cognitive Wellness Assessment — {data['user']['name']}"
+    )
+
+    # ============================================
+    # PAGES
+    # ============================================
+
+    draw_cover_page(c, data)
+    c.showPage()
+
+    draw_executive_summary(c, data)
+    c.showPage()
+
+    draw_brain_analysis(c, data)
+    c.showPage()
+
+    draw_lifestyle_page(c, data)
+    c.showPage()
+
+    draw_ai_insights_page(c, data)
+    c.showPage()
+
+    draw_wellness_page(c, data)
+    c.showPage()
+
+    draw_strengths_page(c, data)
+    c.showPage()
+
+    draw_roadmap_page(c, data)
+    c.showPage()
+
+    draw_cognitive_age_page(c, data)
+    c.showPage()
+
+    draw_legal_page(c, data)
+    c.showPage()
+
+    # ============================================
+    # SAVE PDF
+    # ============================================
 
     c.save()
-    print(f"✅ Premium Report Generated: {output_file}")
+
+    # ============================================
+    # Return bytes
+    # ============================================
+
+    pdf_bytes = buffer.getvalue()
+
+    buffer.close()
+
+    return pdf_bytes
+
 
 
 # ============================================================
