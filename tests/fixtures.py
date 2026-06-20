@@ -72,3 +72,27 @@ FIXTURE_OUT_OF_RANGE = [
     {"itemId": f"S{s}_Q{q}", "value": 5 if (s == 1 and q == 1) else (-1 if (s == 2 and q == 1) else 2)}
     for s in range(1, 8) for q in range(1, 5)
 ]
+# Band-specific moderate fixtures
+FIXTURE_BAND_26 = _build_responses(
+    [1,2,1,2, 2,1,2,1, 2,2,1,2, 1,2,1,2, 2,2,2,1, 1,2,2,1, 1,1,2,2]
+)
+
+FIXTURE_BAND_35 = _build_responses(
+    [2,2,1,2, 2,2,1,2, 2,2,2,1, 2,2,2,1, 2,2,2,2, 2,2,1,2, 2,1,2,2]
+)
+
+FIXTURE_BAND_40 = _build_responses(
+    [2,2,2,2, 2,2,2,1, 2,2,2,2, 2,2,2,2, 3,2,2,2, 2,2,2,2, 2,2,2,2]
+)
+
+FIXTURE_BAND_45 = _build_responses(
+    [2,2,2,3, 2,2,2,2, 3,2,2,2, 2,3,2,2, 3,2,3,2, 2,3,2,2, 2,2,3,2]
+)
+
+FIXTURE_BAND_51 = _build_responses(
+    [2,3,2,2, 3,2,2,2, 2,2,3,2, 2,2,2,3, 3,3,2,2, 3,2,3,2, 2,3,2,2]
+)
+
+FIXTURE_BAND_60 = _build_responses(
+    [3,2,3,2, 3,3,2,2, 3,2,2,3, 2,3,2,2, 3,2,3,3, 3,3,2,3, 3,2,2,3]
+)

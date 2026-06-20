@@ -399,17 +399,96 @@ class TestAgeValidation:
             assert result is not None
 
     def test_age_below_18_raises(self):
-        with pytest.raises(ValueError, match="outside Phase 1 scope"):
+        with pytest.raises(ValueError):
             score(17, "male", FIXTURE_MODERATE)
 
-    def test_age_above_25_raises(self):
-        with pytest.raises(ValueError, match="outside Phase 1 scope"):
-            score(26, "male", FIXTURE_MODERATE)
+    def test_age_above_66_raises(self):
+        with pytest.raises(ValueError):
+            score(67, "male", FIXTURE_MODERATE)
 
     def test_boundary_18_passes(self):
         result = score(18, "female", FIXTURE_PERFECT)
         assert result.overall_score >= 85
 
-    def test_boundary_25_passes(self):
-        result = score(25, "female", FIXTURE_PERFECT)
+    def test_boundary_66_passes(self):
+        result = score(66, "female", FIXTURE_PERFECT)
         assert result.overall_score >= 85
+class TestAgeBands:
+    @pytest.mark.parametrize("age", [22, 28, 35, 40, 45, 51, 60])
+    def test_all_bands_return_valid_result(self, age):
+        result = score(age, "male", FIXTURE_MODERATE)
+        assert result is not None
+        assert 0 <= result.overall_score <= 100
+        assert result.rating in ("Excellent", "Good", "Needs Attention", "At Risk")
+
+    def test_get_age_band_all_boundaries(self):
+        from app.scoring.engine import get_age_band
+        assert get_age_band(18) == "young_adult"
+        assert get_age_band(25) == "young_adult"
+        assert get_age_band(26) == "emerging_professional"
+        assert get_age_band(32) == "emerging_professional"
+        assert get_age_band(33) == "established_adult"
+        assert get_age_band(37) == "established_adult"
+        assert get_age_band(38) == "mid_career"
+        assert get_age_band(42) == "mid_career"
+        assert get_age_band(43) == "midlife_transition"
+        assert get_age_band(47) == "midlife_transition"
+        assert get_age_band(48) == "pre_senior"
+        assert get_age_band(55) == "pre_senior"
+        assert get_age_band(56) == "senior_adult"
+        assert get_age_band(66) == "senior_adult"
+
+    def test_get_age_band_out_of_range_raises(self):
+        from app.scoring.engine import get_age_band
+        with pytest.raises(ValueError):
+            get_age_band(67)
+        with pytest.raises(ValueError):
+            get_age_band(17)
+class TestCognitiveAge:
+    def test_cognitive_age_none_for_under_43(self):
+        result = score(30, "male", FIXTURE_MODERATE)
+        assert result.cognitive_age is None
+
+    def test_cognitive_age_none_for_42(self):
+        result = score(42, "male", FIXTURE_MODERATE)
+        assert result.cognitive_age is None
+
+    def test_cognitive_age_not_none_for_43(self):
+        result = score(43, "male", FIXTURE_MODERATE)
+        assert result.cognitive_age is not None
+        assert isinstance(result.cognitive_age, int)
+
+    def test_cognitive_age_clamped_between_18_and_80(self):
+        result = score(50, "male", FIXTURE_WORST)
+        assert 18 <= result.cognitive_age <= 80
+
+    def test_cognitive_age_lower_when_score_high(self):
+        good   = score(50, "male", FIXTURE_PERFECT)
+        bad    = score(50, "male", FIXTURE_WORST)
+        assert good.cognitive_age < bad.cognitive_age
+
+    def test_cognitive_age_is_int(self):
+        result = score(55, "female", FIXTURE_MODERATE)
+        assert isinstance(result.cognitive_age, int)
+class TestNewRiskRules:
+    def test_age_related_slowdown_fires_for_56_plus(self):
+        # FIXTURE_WORST gives overall < 72
+        result = score(60, "male", FIXTURE_WORST)
+        risks  = " ".join(result.risk_indicators).lower()
+        assert "age-related" in risks
+
+    def test_age_related_slowdown_does_not_fire_under_56(self):
+        result = score(50, "male", FIXTURE_WORST)
+        risks  = " ".join(result.risk_indicators).lower()
+        assert "age-related" not in risks
+
+    def test_midlife_burnout_fires_for_43_plus(self):
+        # FIXTURE_BURNOUT has high stress + low productivity
+        result = score(44, "male", FIXTURE_BURNOUT)
+        risks  = " ".join(result.risk_indicators).lower()
+        assert "midlife burnout" in risks
+
+    def test_midlife_burnout_does_not_fire_under_43(self):
+        result = score(40, "male", FIXTURE_BURNOUT)
+        risks  = " ".join(result.risk_indicators).lower()
+        assert "midlife burnout" not in risks

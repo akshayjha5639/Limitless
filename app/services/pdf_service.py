@@ -17,6 +17,7 @@ from reportlab.lib.styles import ParagraphStyle
 from io import BytesIO
 from reportlab.lib.pagesizes import A4
 from app.services.report_mapper import transform_analysis_to_report
+from app.scoring.engine import get_age_band
 # ============================================================
 # PAGE CONFIG
 # ============================================================

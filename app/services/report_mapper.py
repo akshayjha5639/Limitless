@@ -1,6 +1,6 @@
 
 from datetime import datetime
-
+from app.scoring.engine import get_age_band
 
 def transform_analysis_to_report(analysis: dict) -> dict:
 
@@ -22,11 +22,11 @@ def transform_analysis_to_report(analysis: dict) -> dict:
     def impact_to_score(value: str) -> int:
 
         mapping = {
-            "Low": 25,
-            "Moderate": 50,
-            "Medium": 50,
-            "High": 75,
-            "Very High": 90,
+            "Low": 85,
+            "Medium":50,
+            "Moderate": 60,
+            "High": 30,
+            "Very High": 15,
         }
 
         return mapping.get(value, 50)
@@ -105,7 +105,7 @@ def transform_analysis_to_report(analysis: dict) -> dict:
             analysis["recommendations"][:4],
 
         "improvement_projection":
-            generate_projection(domains)
+            generate_projection(domains,analysis["cognitiveAge"]["actualAge"])
     }
 
     # ============================================================
@@ -129,6 +129,12 @@ def transform_analysis_to_report(analysis: dict) -> dict:
         analysis["recommendations"]
     )
 
+    # ===========================================================
+    # Cognitive age
+    # ===========================================================
+    age        = analysis["cognitiveAge"]["actualAge"]
+    est_age    = analysis["cognitiveAge"].get("estimatedCognitiveAge")
+    
     # ============================================================
     # Final Report Structure
     # ============================================================
@@ -147,6 +153,7 @@ def transform_analysis_to_report(analysis: dict) -> dict:
             "name": "Assessment User",
             "age": analysis["cognitiveAge"]["actualAge"],
             "gender": "Not Specified",
+            "band": get_age_band(analysis["cognitiveAge"]["actualAge"]),
             "assessment_date":
                 datetime.now().strftime("%d %B %Y"),
         },
@@ -165,21 +172,7 @@ def transform_analysis_to_report(analysis: dict) -> dict:
 
         "roadmap": roadmap,
 
-        "cognitive_age": {
-            "status": "Calibration in Progress",
-
-            "completed": [
-                "Cognitive Wellness Score",
-                "Lifestyle Analysis",
-                "Wellness Indicators",
-            ],
-
-            "upcoming": [
-                "Cognitive Age Calibration",
-                "Predictive Cognitive Tracking",
-                "Longitudinal Trend Analysis",
-            ],
-        },
+        "cognitive_age": generate_cognitive_age_section(age, est_age),
 
         "legal": {
             "disclaimer":
@@ -219,7 +212,48 @@ def generate_summary(analysis):
         f"Lifestyle factors including stress, sleep quality, "
         f"and recovery patterns appear to influence performance."
     )
+def generate_cognitive_age_section(age: int, est_age):
 
+    completed = [
+        "Cognitive Wellness Score",
+        "Lifestyle Analysis",
+        "Wellness Indicators",
+    ]
+
+    upcoming = [
+        "Cognitive Age Calibration",
+        "Predictive Cognitive Tracking",
+        "Longitudinal Trend Analysis",
+    ]
+
+    if age < 43:
+        return {
+            "status":   "Cognitive Age Tracking Not Yet Active",
+            "subtitle": f"Activates at age 43 — you are currently {age}",
+            "note":     "At your life stage, developmental wellness tracking applies.",
+            "completed": completed,
+            "upcoming":  upcoming,
+        }
+
+    if est_age is not None:
+        diff = age - est_age
+        direction = "younger" if diff > 0 else "older"
+        return {
+            "status":   f"Estimated Cognitive Age: {est_age}",
+            "subtitle": f"Actual Age: {age}  •  {abs(diff)} years {direction} cognitively",
+            "note":     "Motivational wellness metric only — not a clinical measurement.",
+            "completed": completed,
+            "upcoming":  upcoming,
+        }
+
+    # 43+ but no estimate yet (safety fallback)
+    return {
+        "status":   "Calibration in Progress",
+        "subtitle": "Complete more assessments to establish your baseline",
+        "note":     "Feature activates with longitudinal data.",
+        "completed": completed,
+        "upcoming":  upcoming,
+    }
 
 def generate_ai_analysis(analysis):
 
@@ -274,7 +308,7 @@ def generate_indicator_description(item):
     )
 
 
-def generate_projection(domains):
+def generate_projection(domains,age):
 
     projection = {}
 
@@ -283,12 +317,21 @@ def generate_projection(domains):
         "Attention",
         "Clarity"
     ]
-
+    band = get_age_band(age)
+    boost = {
+        "young_adult":            22,
+        "emerging_professional":  20,
+        "established_adult":      18,
+        "mid_career":             16,
+        "midlife_transition":     14,
+        "pre_senior":             12,
+        "senior_adult":           10,
+    }.get(band, 15)
     for domain in target_domains:
 
         current = domains[domain]
 
-        projected = min(current + 18, 100)
+        projected = min(current + boost, 100)
 
         projection[domain] = {
             "current": current,

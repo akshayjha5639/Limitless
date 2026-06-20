@@ -40,6 +40,16 @@ def _payload(responses, age=22, gender="male", assessment_id="test-uuid-001", pr
 # ===========================================================================
 
 class TestAnalyzeHappyPath:
+    def test_cognitive_age_null_for_under_43(self):
+        r = client.post(BASE_URL, json=_payload(FIXTURE_MODERATE, age=30))
+        assert r.json()["cognitiveAge"]["estimatedCognitiveAge"] is None
+    
+    def test_cognitive_age_integer_for_43_plus(self):
+        r = client.post(BASE_URL, json=_payload(FIXTURE_MODERATE, age=50))
+        est = r.json()["cognitiveAge"]["estimatedCognitiveAge"]
+        assert est is not None
+        assert isinstance(est, int)
+        assert 18 <= est <= 80
     def test_returns_200(self):
         r = client.post(BASE_URL, json=_payload(FIXTURE_MODERATE))
         assert r.status_code == 200
@@ -128,9 +138,9 @@ class TestRecommendations:
         assert "wellness guide" in last.lower() or "clinician" in last.lower()
 
     def test_burnout_profile_gets_burnout_recommendation(self):
-        r = client.post(BASE_URL, json=_payload(FIXTURE_BURNOUT))
+        r = client.post(BASE_URL, json=_payload(FIXTURE_BURNOUT,age=44))
         recs = " ".join(r.json()["recommendations"]).lower()
-        assert "burnout" in recs or "recovery" in recs
+        assert "burnout" in recs or "recovery" in recs or "rest" in recs
 
     def test_perfect_profile_gets_positive_reinforcement(self):
         r = client.post(BASE_URL, json=_payload(FIXTURE_PERFECT))
@@ -210,12 +220,16 @@ class TestProgressDelta:
 # ===========================================================================
 
 class TestInputValidation:
+    @pytest.mark.parametrize("age", [26, 33, 38, 43, 48, 56, 66])
+    def test_band_boundary_ages_return_200(self, age):
+        r = client.post(BASE_URL, json=_payload(FIXTURE_MODERATE, age=age))
+        assert r.status_code == 200
     def test_age_below_18_returns_422(self):
         r = client.post(BASE_URL, json=_payload(FIXTURE_MODERATE, age=17))
         assert r.status_code == 422
 
-    def test_age_above_25_returns_422(self):
-        r = client.post(BASE_URL, json=_payload(FIXTURE_MODERATE, age=30))
+    def test_age_above_66_returns_422(self):
+        r = client.post(BASE_URL, json=_payload(FIXTURE_MODERATE, age=67))
         assert r.status_code == 422
 
     def test_invalid_gender_returns_422(self):

@@ -97,11 +97,11 @@ class TestHappyPath:
 # ===========================================================================
 
 class TestAgeValidation:
-    @pytest.mark.parametrize("age", [17, 26, 0, -1, 100])
+    @pytest.mark.parametrize("age", [17, 67, 0, -1, 100])
     def test_out_of_range_age_returns_422(self, age):
         assert post({**VALID_PAYLOAD, "age": age}).status_code == 422
 
-    @pytest.mark.parametrize("age", [18, 19, 22, 25])
+    @pytest.mark.parametrize("age", [18, 22, 25, 26, 50, 60, 66])
     def test_boundary_ages_accepted(self, age):
         assert post({**VALID_PAYLOAD, "age": age}).status_code == 200
 
@@ -165,6 +165,19 @@ class TestAIMetadata:
 # ===========================================================================
 
 class TestAgeContextInFallback:
+    @pytest.mark.parametrize("age,expected_phrase", [
+        (22, "study"),       # young_adult questions mention study
+        (28, "work"),        # emerging_professional mentions work
+        (60, "daily"),       # senior_adult mentions daily tasks
+    ])
+    def test_band_questions_contain_relevant_keywords(self, age, expected_phrase):
+        r = post({**VALID_PAYLOAD, "age": age})
+        texts = " ".join(
+            item["text"]
+            for s in r.json()["sections"]
+            for item in s["items"]
+        ).lower()
+        assert expected_phrase in texts
     def test_18_to_20_context_in_questions(self):
         r = post({**VALID_PAYLOAD, "age": 19})
         texts = " ".join(
@@ -178,8 +191,8 @@ class TestAgeContextInFallback:
     def test_different_ages_can_produce_different_questions(self):
         # With real Gemini this would differ; with fallback S1_Q1 text differs by age
         r18 = post({**VALID_PAYLOAD, "age": 19}).json()
-        r24 = post({**VALID_PAYLOAD, "age": 24}).json()
+        r28 = post({**VALID_PAYLOAD, "age": 28}).json()
         # S1_Q1 text includes life stage in fallback
         q18 = r18["sections"][0]["items"][0]["text"]
-        q24 = r24["sections"][0]["items"][0]["text"]
-        assert q18 != q24
+        q28 = r28["sections"][0]["items"][0]["text"]
+        assert q18 != q28
