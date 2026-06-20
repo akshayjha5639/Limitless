@@ -99,7 +99,7 @@ def _map_result_to_response(
 
     # Recommendations
     recommendations = build_recommendations(
-        result.section_scores, result.domain_scores, result.risk_indicators
+        result.section_scores, result.domain_scores, result.risk_indicators,age=age
     )
 
     # Progress delta (only if prior report supplied)
@@ -119,7 +119,7 @@ def _map_result_to_response(
     )
 
     # Cognitive age — stubbed for 18–25 cohort
-    cognitive_age = CognitiveAge(actualAge=age, estimatedCognitiveAge=None)
+    cognitive_age = CognitiveAge(actualAge=age, estimatedCognitiveAge=result.cognitive_age)
 
     # Chart data
     charts = _build_chart_data(domains, impacts)

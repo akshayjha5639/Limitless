@@ -46,7 +46,7 @@ class BrandingParams(BaseModel):
 
 class AnalyzeRequest(BaseModel):
     assessmentId: str = Field(..., description="UUID from /generate-questions")
-    age: int = Field(..., ge=18, le=25)
+    age: int = Field(..., ge=18, le=66)
     gender: GenderType
     responses: list[ResponseItem] = Field(..., min_length=1, max_length=28)
     priorReport: Optional[dict] = Field(default=None, description="Previous analysis JSON for delta tracking")
@@ -81,6 +81,6 @@ class GenderEnum(str, Enum):
 # ---------------------------------------------------------------------------
 
 class GenerateQuestionsRequest(BaseModel):
-    age: int = Field(..., ge=18, le=25, description="User age (Phase 1: 18–25 only)")
+    age: int = Field(..., ge=18, le=66, description="User age ")
     gender: GenderEnum
     locale: str = Field(default="en", max_length=10)

@@ -56,7 +56,7 @@ class CognitiveAge(BaseModel):
     actualAge:              int
     estimatedCognitiveAge:  Optional[int] = Field(
         default=None,
-        description="None for Phase 1 (18–25 cohort). Heuristic not meaningful at this age range."
+        description="Estimated age according the performation on the assessment."
     )
     disclaimer: str = Field(
         default="Motivational wellness metric only — not a clinical measurement."

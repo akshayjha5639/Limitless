@@ -23,7 +23,7 @@ class GenderEnum(str, Enum):
 
 
 class GenerateQuestionsRequest(BaseModel):
-    age:    int        = Field(..., ge=18, le=25)
+    age:    int        = Field(..., ge=18, le=66)
     gender: GenderEnum
     locale: str        = Field(default="en")
 

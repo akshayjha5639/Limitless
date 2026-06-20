@@ -4,7 +4,6 @@ Scoring Engine — v1.0
 
 Pipeline: Raw responses (0–4) → Section averages → Normalize (0–100) → Invert → Domain scores → Overall score
 
-Age scope: 18–25 cohort (Phase 1)
 """
 
 from dataclasses import dataclass, field
@@ -16,8 +15,49 @@ from enum import Enum
 # Constants
 # ---------------------------------------------------------------------------
 
-VALID_AGE_RANGE = (18, 25)  # Phase 1: 18–25 cohort only
+VALID_AGE_RANGE = (18, 66) 
 
+# ---------------------------------------------------------------------------
+# Age Band Helper
+# ---------------------------------------------------------------------------
+
+def get_age_band(age: int) -> str:
+    """
+    Returns the age band key for a given age.
+    Used by question_generator.py and recommendations.py
+    to avoid duplicating band logic across files.
+    
+    Bands:
+        18–25  → young_adult
+        26–32  → emerging_professional
+        33–37  → established_adult
+        38–42  → mid_career
+        43–47  → midlife_transition
+        48–55  → pre_senior
+        56–66  → senior_adult
+    
+    Note: 38 belongs to mid_career per design decision.
+    """
+    if 18 <= age <= 25:
+        return "young_adult"
+    elif 26 <= age <= 32:
+        return "emerging_professional"
+    elif 33 <= age <= 37:
+        return "established_adult"
+    elif 38 <= age <= 42:
+        return "mid_career"
+    elif 43 <= age <= 47:
+        return "midlife_transition"
+    elif 48 <= age <= 55:
+        return "pre_senior"
+    elif 56 <= age <= 66:
+        return "senior_adult"
+    else:
+        raise ValueError(
+            f"Age {age} is outside supported range (18–66). "
+            f"Update VALID_AGE_RANGE and get_age_band() together."
+        )
+        
 SECTION_IDS = ["S1", "S2", "S3", "S4", "S5", "S6", "S7"]
 ITEMS_PER_SECTION = 4
 RESPONSE_MIN, RESPONSE_MAX = 0, 4
@@ -67,7 +107,14 @@ RISK_RULES = [
         "Possible mood-related concentration issues",
         lambda d, age: d["emotional_wellbeing"] < 60,
     ),
-    # Age > 55 rule intentionally excluded for 18–25 cohort
+    (
+        "Possible midlife burnout pattern",
+        lambda d, age: age >= 43 and d["stress_resilience"] < 60 and d["productivity_performance"] < 65,
+    ),
+    (
+        "Possible age-related cognitive slowdown indicators",
+        lambda d, age: age >= 56 and d["overall"] < 72,
+    ),
 ]
 
 # Lifestyle impact factor thresholds → High / Moderate / Low
@@ -125,6 +172,7 @@ class ScoringResult:
     lifestyle_impacts:  LifestyleImpacts
     risk_indicators:    list[str]
     strengths:          list[str]
+    cognitive_age:      Optional[int]
     audit:              dict = field(default_factory=dict)
 
 
@@ -305,7 +353,7 @@ def compute_lifestyle_impacts(s: SectionScores) -> LifestyleImpacts:
 # Step 7 — Risk indicators
 # ---------------------------------------------------------------------------
 
-def compute_risk_indicators(s: SectionScores, d: DomainScores, age: int) -> list[str]:
+def compute_risk_indicators(s: SectionScores, d: DomainScores, age: int,overall_score : float=0.0) -> list[str]:
     # Build a flat dict including both section and domain scores for rule access
     scores = {
         "stress_resilience":      s.stress_resilience,
@@ -314,10 +362,58 @@ def compute_risk_indicators(s: SectionScores, d: DomainScores, age: int) -> list
         "sleep_recovery":         s.sleep_recovery,
         "memory":                 d.memory,
         "emotional_wellbeing":    s.emotional_wellbeing,
+        "overall":                  overall_score,
     }
     return [label for label, condition in RISK_RULES if condition(scores, age)]
 
+# ---------------------------------------------------------------------------
+# Cognitive Age Heuristic
+# ---------------------------------------------------------------------------
 
+def compute_cognitive_age(
+    age: int,
+    overall_score: float,
+    sleep_score: float,
+    stress_score: float,
+) -> Optional[int]:
+    """
+    Estimates cognitive age based on overall score, sleep, and stress.
+    Returns None for bands below 43 — not meaningful for younger cohorts.
+    
+    Formula (from spec):
+      base     = actual age
+      score δ  = −1 year per +3 pts above 70 / +1 year per −3 pts below 70
+      sleep δ  = ±1–2 years based on sleep quality
+      stress δ = ±1–2 years based on stress level
+      result   = clamp(base + all deltas, 18, 80)
+    """
+    if age < 43:
+        return None
+
+    estimated = float(age)
+
+    # --- Score delta ---
+    score_delta = overall_score - 70
+    estimated -= score_delta / 3   # +3 pts above 70 = −1 yr; −3 pts below 70 = +1 yr
+
+    # --- Sleep modifier ---
+    if sleep_score < 50:
+        estimated += 2
+    elif sleep_score < 70:
+        estimated += 1
+    elif sleep_score >= 85:
+        estimated -= 1
+
+    # --- Stress modifier ---
+    if stress_score < 50:
+        estimated += 2
+    elif stress_score < 70:
+        estimated += 1
+    elif stress_score >= 85:
+        estimated -= 1
+
+    # --- Clamp to realistic range ---
+    return int(round(max(18, min(80, estimated))))
 # ---------------------------------------------------------------------------
 # Step 8 — Strengths (domains >= 80)
 # ---------------------------------------------------------------------------
@@ -389,12 +485,18 @@ def score(age: int, gender: str, responses: list[dict]) -> ScoringResult:
 
     # Step 5 — overall score + rating
     overall_score, rating = compute_overall_score(domain_scores)
-
+    
+    cognitive_age = compute_cognitive_age(
+    age=age,
+    overall_score=overall_score,
+    sleep_score=section_scores.sleep_recovery,
+    stress_score=section_scores.stress_resilience,
+)
     # Step 6 — lifestyle impacts
     lifestyle_impacts = compute_lifestyle_impacts(section_scores)
 
     # Step 7 — risk indicators
-    risk_indicators = compute_risk_indicators(section_scores, domain_scores, age)
+    risk_indicators = compute_risk_indicators(section_scores, domain_scores, age,overall_score)
 
     # Step 8 — strengths
     strengths = compute_strengths(domain_scores)
@@ -410,5 +512,6 @@ def score(age: int, gender: str, responses: list[dict]) -> ScoringResult:
         lifestyle_impacts=lifestyle_impacts,
         risk_indicators=risk_indicators,
         strengths=strengths,
+        cognitive_age=cognitive_age,
         audit=audit,
     )
