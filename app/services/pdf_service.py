@@ -3002,3 +3002,408 @@ if __name__ == "__main__":
         f.write(pdf_bytes)
 
     print(f"PDF generated: {os.path.getsize(output_path):,} bytes → {output_path}") 
+
+def _draw_radar(c, cx, cy, radius, domains, fill=PRIMARY):
+    """
+    8-axis radar / spider chart of domain scores (0-100).
+    Labels + scores sit just outside the outer ring, anchored by quadrant.
+    """
+    import math
+    names = list(domains.keys())
+    n = len(names)
+    short = {"Problem Solving": "Problem", "Reaction Time": "Reaction"}
+ 
+    def pt(frac, i):
+        ang = math.radians(90 - i * (360.0 / n))
+        return (cx + radius * frac * math.cos(ang),
+                cy + radius * frac * math.sin(ang))
+ 
+    # Grid rings (octagons)
+    c.setStrokeColor(BORDER_COLOR)
+    c.setLineWidth(0.5)
+    for ring in (0.25, 0.5, 0.75, 1.0):
+        p = c.beginPath()
+        x0, y0 = pt(ring, 0)
+        p.moveTo(x0, y0)
+        for i in range(1, n):
+            xi, yi = pt(ring, i)
+            p.lineTo(xi, yi)
+        p.close()
+        c.drawPath(p, stroke=1, fill=0)
+ 
+    # Spokes
+    for i in range(n):
+        xi, yi = pt(1.0, i)
+        c.line(cx, cy, xi, yi)
+ 
+    # Data polygon
+    p = c.beginPath()
+    fx, fy = pt(domains[names[0]] / 100.0, 0)
+    p.moveTo(fx, fy)
+    for i in range(1, n):
+        xi, yi = pt(domains[names[i]] / 100.0, i)
+        p.lineTo(xi, yi)
+    p.close()
+    c.setFillColor(Color(fill.red, fill.green, fill.blue, alpha=0.20))
+    c.setStrokeColor(fill)
+    c.setLineWidth(1.6)
+    c.drawPath(p, stroke=1, fill=1)
+ 
+    # Vertex dots + labels + scores
+    for i, name in enumerate(names):
+        sc = domains[name]
+        vx, vy = pt(sc / 100.0, i)
+        c.setFillColor(score_color(sc))
+        c.circle(vx, vy, 2.4, fill=1, stroke=0)
+ 
+        ang = math.radians(90 - i * (360.0 / n))
+        ox, oy = math.cos(ang), math.sin(ang)
+        tx = cx + (radius + 9) * ox
+        ty = cy + (radius + 9) * oy + (2 if oy >= 0 else -8)
+        lbl = short.get(name, name)
+        c.setFont(FONT_BOLD, 7)
+        c.setFillColor(TEXT_SECONDARY)
+        draw_fn = (c.drawString if ox > 0.25
+                   else c.drawRightString if ox < -0.25 else c.drawCentredString)
+        draw_fn(tx, ty, lbl)
+        c.setFont(FONT_BOLD, 7)
+        c.setFillColor(score_color(sc))
+        draw_fn(tx, ty - 8, str(sc))
+ 
+ 
+def draw_teaser_report(c, data):
+    """
+    Single-page A4 cognitive wellness report for the Limitless AI platform.
+ 
+    `data` is the dict returned by transform_analysis_to_report().
+    All content is fully visible; the "Your Complete Report Includes" card
+    lists what the detailed report adds and notes how to unlock it.
+    """
+    score      = data["overall_score"]
+    user       = data["user"]
+    benchmarks = data["benchmarks"]
+    strengths  = data["strengths"]
+    traffic    = data["traffic_light"]
+    lifestyle  = data["lifestyle"]
+ 
+    inner_w = PAGE_WIDTH - 2 * MARGIN          # 515pt
+    GAP     = 13
+ 
+    # ---- Page background ----------------------------------------------------
+    c.setFillColor(BACKGROUND)
+    c.rect(0, 0, PAGE_WIDTH, PAGE_HEIGHT, fill=1, stroke=0)
+ 
+    # =======================================================================
+    # SECTION 1 — Header strip (56pt, full width)
+    # =======================================================================
+    HEADER_H = 56
+    header_y = PAGE_HEIGHT - HEADER_H
+    draw_gradient_rect(c, 0, header_y, PAGE_WIDTH, HEADER_H, GRADIENT_1, GRADIENT_3)
+    draw_text(c, "LIMITLESS", MARGIN, header_y + 30, size=18, font=FONT_BOLD, color=white)
+    draw_text(c, "COGNITIVE WELLNESS", MARGIN, header_y + 14, size=8, color=white)
+    draw_text(c, f"Report ID: {data.get('report_id', '')}", PAGE_WIDTH - MARGIN,
+              header_y + 32, size=8, color=white, align="right")
+    draw_text(c, user.get("assessment_date", ""), PAGE_WIDTH - MARGIN,
+              header_y + 18, size=8, color=Color(1, 1, 1, alpha=0.85), align="right")
+ 
+    y = header_y - GAP
+ 
+    # =======================================================================
+    # SECTION 2 — Score gauge + peer comparison (compact)
+    # =======================================================================
+    S2_H = 144
+    S2_Y = y - S2_H
+    PAD  = 14
+    draw_card(c, MARGIN, S2_Y, inner_w, S2_H, radius=14, border=True)
+ 
+    left_w   = inner_w * 0.40
+    gauge_cx = MARGIN + left_w / 2
+    gauge_cy = S2_Y + S2_H / 2 + 14
+    draw_large_gauge(c, gauge_cx, gauge_cy, 46, score)
+    status = score_status(score)
+    draw_tag(c, gauge_cx - 42, S2_Y + 12, status, score_color(score),
+             white, width=84, height=20, radius=9)
+ 
+    c.setStrokeColor(BORDER_COLOR)
+    c.setLineWidth(0.5)
+    c.line(MARGIN + left_w, S2_Y + PAD, MARGIN + left_w, S2_Y + S2_H - PAD)
+ 
+    rx = MARGIN + left_w + PAD
+    rw = inner_w - left_w - PAD * 2
+    ry = S2_Y + S2_H - PAD - 4
+    draw_text(c, "Your Cognitive Wellness Score", rx, ry, size=12,
+              font=FONT_BOLD, color=TEXT_PRIMARY)
+    ry -= 16
+    draw_text(c, f"{status} - {score}/100", rx, ry, size=10,
+              font=FONT_BOLD, color=score_color(score))
+    ry -= 13
+    draw_text(c, f"Top {100 - benchmarks['percentile']}% of {benchmarks['band_label']}",
+              rx, ry, size=8, color=TEXT_MUTED)
+    ry -= 20
+ 
+    label_w = 60
+    bar_x   = rx + label_w
+    bar_w   = rw - label_w - 26
+    rows = [
+        ("You",      score,                       score_color(score)),
+        ("Peer Avg", benchmarks["peer_average"],  HexColor("#CBD5E1")),
+        ("Top 10%",  benchmarks["top_10_pct"],    SUCCESS),
+    ]
+    for label, val, clr in rows:
+        draw_text(c, label, rx, ry, size=8, color=TEXT_SECONDARY)
+        c.setFillColor(HexColor("#F1F5F9"))
+        c.roundRect(bar_x, ry - 2, bar_w, 8, 4, fill=1, stroke=0)
+        c.setFillColor(clr)
+        c.roundRect(bar_x, ry - 2, max(4, bar_w * val / 100), 8, 4, fill=1, stroke=0)
+        draw_text(c, str(val), bar_x + bar_w + 6, ry, size=8,
+                  font=FONT_BOLD, color=TEXT_SECONDARY)
+        ry -= 18
+ 
+    y = S2_Y - GAP
+ 
+    # =======================================================================
+    # SECTION 3 — Domain radar + Cognitive Age + Risk indicators
+    # =======================================================================
+    S3_H = 176
+    S3_Y = y - S3_H
+    draw_card(c, MARGIN, S3_Y, inner_w, S3_H, radius=14, border=True)
+ 
+    radar_zone_w = 268
+    draw_text(c, "Brain Function - 8 Domains", MARGIN + 16, S3_Y + S3_H - 18,
+              size=10, font=FONT_BOLD, color=TEXT_PRIMARY)
+    radar_cx = MARGIN + radar_zone_w / 2
+    radar_cy = S3_Y + S3_H / 2 - 6
+    _draw_radar(c, radar_cx, radar_cy, 56, data["domains"])
+ 
+    # Vertical divider
+    div_x = MARGIN + radar_zone_w
+    c.setStrokeColor(BORDER_COLOR)
+    c.setLineWidth(0.5)
+    c.line(div_x, S3_Y + 12, div_x, S3_Y + S3_H - 12)
+ 
+    # Right panel — Cognitive Age
+    px = div_x + 16
+    pw = inner_w - radar_zone_w - 30
+    cog_age = user.get("cognitive_age_display")
+    actual  = user.get("age")
+    draw_text(c, "COGNITIVE AGE", px, S3_Y + S3_H - 20, size=8,
+              font=FONT_BOLD, color=TEXT_SECONDARY)
+    if cog_age is not None and actual is not None:
+        delta = cog_age - actual
+        if delta <= 0:
+            d_color, d_text = SUCCESS, f"{abs(delta)} yrs younger"
+        elif delta <= 3:
+            d_color, d_text = WARNING, f"+{delta} yrs older"
+        else:
+            d_color, d_text = DANGER, f"+{delta} yrs older"
+        draw_text(c, str(cog_age), px, S3_Y + S3_H - 52, size=34,
+                  font=FONT_BOLD, color=d_color)
+        draw_text(c, "yrs", px + c.stringWidth(str(cog_age), FONT_BOLD, 34) + 4,
+                  S3_Y + S3_H - 52, size=11, color=TEXT_MUTED)
+        draw_text(c, f"Actual age: {actual}", px, S3_Y + S3_H - 66, size=8,
+                  color=TEXT_MUTED)
+        draw_tag(c, px, S3_Y + S3_H - 88, d_text, d_color, white,
+                 height=16, radius=7)
+        msg = user.get("cognitive_age_message", "")
+        if msg:
+            wrap_text_in_box(c, msg, px, S3_Y + S3_H - 104, pw, 8,
+                             line_height=10, max_lines=2, color=TEXT_SECONDARY)
+    else:
+        draw_text(c, "Available in full report", px, S3_Y + S3_H - 50, size=9,
+                  color=TEXT_MUTED)
+ 
+    # Right panel — Risk indicators (below cognitive age)
+    draw_divider(c, px, S3_Y + 58, pw)
+    draw_text(c, "RISK INDICATORS", px, S3_Y + 46, size=8,
+              font=FONT_BOLD, color=DANGER)
+    risks = data.get("risk_indicators", []) or ["No significant risks detected"]
+    ind_y = S3_Y + 32
+    for r in risks[:2]:
+        c.setFillColor(DANGER)
+        c.circle(px + 2, ind_y + 3, 2, fill=1, stroke=0)
+        wrap_text_in_box(c, r, px + 9, ind_y, pw - 10, 8,
+                         line_height=9, max_lines=2, color=TEXT_SECONDARY)
+        ind_y -= 20
+ 
+    y = S3_Y - GAP
+ 
+    # =======================================================================
+    # SECTION 4 — Traffic light (all three columns visible)
+    # =======================================================================
+    S4_H  = 84
+    S4_Y  = y - S4_H
+    col_w = inner_w / 3
+    cpad  = 12
+    draw_card(c, MARGIN, S4_Y, inner_w, S4_H, radius=14, border=True)
+ 
+    def _tl_column(idx, header, header_color, items):
+        col_x = MARGIN + idx * col_w
+        if idx > 0:
+            c.setStrokeColor(BORDER_COLOR)
+            c.setLineWidth(0.5)
+            c.line(col_x, S4_Y + 8, col_x, S4_Y + S4_H - 8)
+        draw_text(c, header, col_x + cpad, S4_Y + S4_H - 18, size=8,
+                  font=FONT_BOLD, color=header_color)
+        row_y = S4_Y + S4_H - 36
+        if not items:
+            draw_text(c, "None", col_x + cpad, row_y + 2, size=8, color=TEXT_MUTED)
+            return
+        for i, item in enumerate(items[:3]):
+            lbl = item["domain"] if isinstance(item, dict) else str(item)
+            sc  = item["score"] if isinstance(item, dict) else 75
+            pw2 = c.stringWidth(lbl, FONT_BOLD, 8) + 14
+            c.setFillColor(score_color_light(sc))
+            c.roundRect(col_x + cpad, row_y - i * 16, pw2, 13, 5, fill=1, stroke=0)
+            draw_text(c, lbl, col_x + cpad + 7, row_y - i * 16 + 4, size=8,
+                      font=FONT_BOLD, color=score_color(sc))
+ 
+    _tl_column(0, "HIGH PRIORITY",   DANGER,  traffic["red"])
+    _tl_column(1, "NEEDS ATTENTION", WARNING, traffic["yellow"])
+    _tl_column(2, "STRENGTHS",       SUCCESS, traffic["green"])
+ 
+    y = S4_Y - GAP
+ 
+    # =======================================================================
+    # SECTION 5 — Lifestyle snapshot
+    # =======================================================================
+    S5_H = 78
+    S5_Y = y - S5_H
+    draw_card(c, MARGIN, S5_Y, inner_w, S5_H, radius=14, border=True)
+    draw_text(c, "Lifestyle Impact Snapshot", MARGIN + PAD, S5_Y + S5_H - 16,
+              size=10, font=FONT_BOLD, color=TEXT_PRIMARY)
+    keys   = list(lifestyle.keys())
+    slot_w = inner_w / len(keys)
+    dots_y = S5_Y + S5_H - 40
+    for i, k in enumerate(keys):
+        dcx = MARGIN + slot_w * i + slot_w / 2
+        c.setFillColor(score_color(lifestyle[k]))
+        c.circle(dcx, dots_y, 7, fill=1, stroke=0)
+        draw_text(c, k, dcx, dots_y - 16, size=8, color=TEXT_MUTED, align="center")
+    c.setFont("Helvetica-Oblique", 7)
+    c.setFillColor(TEXT_MUTED)
+    c.drawCentredString(PAGE_WIDTH / 2, S5_Y + 8,
+                        "Full lifestyle analysis available in your complete report")
+ 
+    y = S5_Y - GAP
+ 
+    # =======================================================================
+    # SECTION 6 — Complete report contents (with unlock note)
+    # =======================================================================
+    S6_H = 104
+    S6_Y = y - S6_H
+    draw_card(c, MARGIN, S6_Y, inner_w, S6_H, radius=14, border=True)
+    c.setFillColor(PRIMARY)
+    c.roundRect(MARGIN, S6_Y, 12, S6_H, 14, fill=1, stroke=0)
+    c.rect(MARGIN + 6, S6_Y, 6, S6_H, fill=1, stroke=0)
+ 
+    tx = MARGIN + 24
+    draw_text(c, "Your Complete Report Includes", tx, S6_Y + S6_H - 20,
+              size=11, font=FONT_BOLD, color=TEXT_PRIMARY)
+    draw_divider(c, tx, S6_Y + S6_H - 30, inner_w - 36)
+ 
+    items = [
+        "Core Brain Function (8 Domains)",
+        "Root Cause Analysis",
+        "Benchmark vs Age Group",
+        "Future Risk Prediction (30 & 90 days)",
+        "30-Day Improvement Roadmap",
+        "AI Coach Recommendations",
+        "Cognitive Age Estimate",
+    ]
+    col_item_w = (inner_w - 36) / 2
+    x_left  = tx
+    x_right = tx + col_item_w
+    start_y = S6_Y + S6_H - 42
+    spacing = 13
+    for idx, item in enumerate(items):
+        col = 0 if idx < 4 else 1
+        row = idx if idx < 4 else idx - 4
+        ix  = x_left if col == 0 else x_right
+        iy  = start_y - row * spacing
+        c.setFillColor(PRIMARY)
+        c.circle(ix + 3, iy + 3, 2.2, fill=1, stroke=0)
+        draw_text(c, item, ix + 12, iy, size=9, color=TEXT_SECONDARY)
+ 
+    c.setFont("Helvetica-Oblique", 8)
+    c.setFillColor(PRIMARY)
+    c.drawString(tx, S6_Y + 10,
+                 "See your full detailed report by unlocking full access.")
+ 
+ 
+    # =======================================================================
+    # SECTION 7 — CTA banner (pinned above footer)
+    # =======================================================================
+    FOOTER_H = 30
+    S7_H = 80
+    S7_Y = FOOTER_H + 10
+    # rounded gradient: clip a rounded rect, paint gradient inside
+    c.saveState()
+    p = c.beginPath()
+    p.roundRect(MARGIN, S7_Y, inner_w, S7_H, 14)
+    c.clipPath(p, stroke=0, fill=0)
+    draw_gradient_rect(c, MARGIN, S7_Y, inner_w, S7_H, GRADIENT_1, GRADIENT_3, steps=50)
+    c.restoreState()
+ 
+    cta_cx = PAGE_WIDTH / 2
+    draw_text(c, "Your full 10-page AI Cognitive Wellness Report is ready.",
+              cta_cx, S7_Y + S7_H - 22, size=11, font=FONT_BOLD, color=white, align="center")
+    draw_text(c, "Unlock personalized insights, your improvement plan, and cognitive age estimate.",
+              cta_cx, S7_Y + S7_H - 38, size=9,
+              color=Color(1, 1, 1, alpha=0.70), align="center")
+    btn_w, btn_h = 168, 28
+    btn_x = cta_cx - btn_w / 2
+    btn_y = S7_Y + 14
+    c.setFillColor(SUCCESS)
+    c.roundRect(btn_x, btn_y, btn_w, btn_h, 9, fill=1, stroke=0)
+    draw_text(c, "UNLOCK FULL REPORT", cta_cx, btn_y + btn_h / 2 - 4, size=10,
+              font=FONT_BOLD, color=white, align="center")
+ 
+    # ---- Footer -------------------------------------------------------------
+    c.setFillColor(HexColor("#0F172A"))
+    c.rect(0, 0, PAGE_WIDTH, FOOTER_H, fill=1, stroke=0)
+    draw_text(c, "LIMITLESS AI", MARGIN, FOOTER_H / 2 - 3, size=9,
+              font=FONT_BOLD, color=white)
+    draw_text(c, "Not a clinical diagnostic tool", PAGE_WIDTH / 2, FOOTER_H / 2 - 3,
+              size=9, color=TEXT_MUTED, align="center")
+    draw_text(c, f"Report ID: {data.get('report_id', '')}", PAGE_WIDTH - MARGIN,
+              FOOTER_H / 2 - 3, size=9, color=TEXT_MUTED, align="right")
+ 
+ 
+def build_teaser_report(analysis: dict, brand: dict = None) -> bytes:
+    """Build the teaser PDF and return raw bytes."""
+    data = transform_analysis_to_report(analysis)   # prod: transform_analysis_to_report(analysis)
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    draw_teaser_report(c, data)
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf.read()
+ 
+ 
+if __name__ == "__main__":
+    sample_analysis = {
+        "assessmentId": "LMT-TEASER-001",
+        "overall": {"score": 72, "rating": "Good"},
+        "domains": {
+            "memory": 38, "attentionFocus": 31, "processingSpeed": 58,
+            "executiveFunction": 52, "mentalClarity": 44,
+            "languageSkills": 72, "problemSolving": 68, "reactionTime": 80,
+        },
+        "lifestyleImpacts": {
+            "sleepQualityImpact": "High", "stressLevelImpact": "Moderate",
+            "anxietyLoadImpact": "Moderate", "burnoutRiskImpact": "High",
+        },
+        "riskIndicators": ["Possible attention difficulties", "Possible stress-related fatigue"],
+        "cognitiveAge": {"actualAge": 29, "estimatedCognitiveAge": None},
+        "strengths": ["Reaction time", "Language skills", "Problem solving"],
+        "recommendations": ["Prioritise 7-8 hours sleep.", "Try Pomodoro technique."],
+        "progress": {"available": False, "deltas": []},
+        "charts": {"radarDomains": {"labels": [], "values": []}, "barLifestyleImpacts": {"labels": [], "values": []}},
+        "disclaimers": ["This is a wellness screening tool, not a diagnosis."],
+        "privacy": {"dataCollected": ["age", "gender"], "storagePolicy": "Not stored.", "hipaaNote": "HIPAA applies."},
+    }
+    pdf = build_teaser_report(sample_analysis, {})
+    open("teaser_report.pdf", "wb").write(pdf)
+    print(f"Generated: {len(pdf):,} bytes")
+ 

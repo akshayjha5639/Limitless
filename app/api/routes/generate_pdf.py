@@ -10,6 +10,7 @@ from fastapi.responses import Response
 
 from app.models.request import GeneratePDFRequest
 from app.services.pdf_service import build_report
+from app.services.pdf_service import build_teaser_report 
 
 router = APIRouter()
 
@@ -43,4 +44,21 @@ async def generate_pdf(request: GeneratePDFRequest) -> Response:
             "Content-Disposition":
                 "attachment; filename=limitless_report.pdf"
         }
+    )
+@router.post("/generate-teaser-pdf")
+async def generate_teaser_pdf(request: GeneratePDFRequest) -> Response:
+    '''
+    
+    Generates a single-page teaser PDF.
+    Accepts the same request body as /generate-pdf.
+    Returns binary application/pdf.
+    '''
+    pdf_bytes = build_teaser_report(
+        analysis=request.analysis,
+        brand=getattr(request, "brand", {}),
+    )
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": "attachment; filename=limitless_teaser.pdf"},
     )
