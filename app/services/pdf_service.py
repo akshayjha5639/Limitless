@@ -3,7 +3,7 @@ LIMITLESS PREMIUM REPORT — PRODUCTION REDESIGN
 Run:
     python pdf_service.py
 """
-
+import io
 import os
 import math
 from datetime import datetime
