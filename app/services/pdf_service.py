@@ -3400,7 +3400,7 @@ def draw_teaser_report(c, data):
  
 def build_teaser_report(analysis: dict, brand: dict = None) -> bytes:
     """Build the teaser PDF and return raw bytes."""
-    data = transform_analysis_to_report(analysis["analysis"])   # prod: transform_analysis_to_report(analysis)
+    data = transform_analysis_to_report(analysis)   # prod: transform_analysis_to_report(analysis)
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
     draw_teaser_report(c, data)
