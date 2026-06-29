@@ -3,7 +3,7 @@ LIMITLESS PREMIUM REPORT — PRODUCTION REDESIGN
 Run:
     python pdf_service.py
 """
-
+import io
 import os
 import math
 from datetime import datetime
@@ -3069,7 +3069,36 @@ def _draw_radar(c, cx, cy, radius, domains, fill=PRIMARY):
         c.setFont(FONT_BOLD, 7)
         c.setFillColor(score_color(sc))
         draw_fn(tx, ty - 8, str(sc))
+
+def _draw_score_gauge(c, cx, cy, radius, score):
+    """
+    Clean 180-degree score gauge for the report's overall score.
+    Dedicated to draw_teaser_report so the shared draw_large_gauge
+    (used by the full report cover) stays untouched.
+    """
+    score = max(0.0, min(100.0, float(score)))
+    track_w = 11
+    c.saveState()
+    c.setLineCap(1)  # round end caps
  
+    # Background track (top semicircle: 0 -> 180 sweeps across the top)
+    c.setStrokeColor(HexColor("#E2E8F0"))
+    c.setLineWidth(track_w)
+    c.arc(cx - radius, cy - radius, cx + radius, cy + radius, 0, 180)
+ 
+    # Value arc: start at the left (180) and sweep clockwise by score%
+    c.setStrokeColor(score_color(score))
+    c.setLineWidth(track_w)
+    c.arc(cx - radius, cy - radius, cx + radius, cy + radius, 180, -180 * score / 100.0)
+    c.restoreState()
+ 
+    # Centre value, sitting in the mouth of the arc
+    c.setFont(FONT_BOLD, 26)
+    c.setFillColor(score_color(score))
+    c.drawCentredString(cx, cy - 4, str(int(round(score))))
+    c.setFont(FONT, 8)
+    c.setFillColor(TEXT_MUTED)
+    c.drawCentredString(cx, cy - 18, "/ 100")
  
 def draw_teaser_report(c, data):
     """
@@ -3119,7 +3148,7 @@ def draw_teaser_report(c, data):
     left_w   = inner_w * 0.40
     gauge_cx = MARGIN + left_w / 2
     gauge_cy = S2_Y + S2_H / 2 + 14
-    draw_large_gauge(c, gauge_cx, gauge_cy, 46, score)
+    _draw_score_gauge(c, gauge_cx, gauge_cy, 46, score)
     status = score_status(score)
     draw_tag(c, gauge_cx - 42, S2_Y + 12, status, score_color(score),
              white, width=84, height=20, radius=9)
