@@ -6,6 +6,12 @@ Mirrors the full /analyze output schema from the technical spec.
 from pydantic import BaseModel, Field
 from typing import Optional
 from enum import Enum
+from datetime import datetime, timezone
+
+
+def _utc_now_iso() -> str:
+    """ISO-8601 UTC timestamp with Z suffix (PRD §3.1 session_timestamp)."""
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +123,11 @@ MANDATORY_DISCLAIMERS = [
 
 class AnalyzeResponse(BaseModel):
     assessmentId:       str
+    sessionTimestamp:   str = Field(
+        default_factory=_utc_now_iso,
+        description="ISO-8601 UTC completion time — required by the "
+                    "longitudinal tracking engine for velocity math.",
+    )
     overall:            OverallScore
     domains:            DomainScores
     lifestyleImpacts:   LifestyleImpacts

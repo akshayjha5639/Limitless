@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from app.api.routes.analyze import router as analyze_router
 from app.api.routes.questions import router as questions_router
 from app.api.routes.generate_pdf import router as pdf_router
+from app.api.routes.longitudinal import router as longitudinal_router
 from app.core.config import settings
 
 
@@ -31,6 +32,7 @@ API_PREFIX = "/api/v1"
 app.include_router(analyze_router,   prefix=API_PREFIX)
 app.include_router(questions_router, prefix=API_PREFIX)
 app.include_router(pdf_router,       prefix=API_PREFIX)
+app.include_router(longitudinal_router, prefix=API_PREFIX)
 
 @app.get("/")
 async def root():
