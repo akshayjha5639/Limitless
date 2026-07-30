@@ -128,6 +128,8 @@ class AnalyzeResponse(BaseModel):
         description="ISO-8601 UTC completion time — required by the "
                     "longitudinal tracking engine for velocity math.",
     )
+    name:                Optional[str] = None
+    gender:              Optional[str] = None
     overall:            OverallScore
     domains:            DomainScores
     lifestyleImpacts:   LifestyleImpacts

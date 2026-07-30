@@ -19,6 +19,17 @@ def transform_analysis_to_report(analysis: dict) -> dict:
     # Helpers
     # ============================================================
 
+    def format_gender_display(value):
+
+        labels = {
+            "male": "Male",
+            "female": "Female",
+            "other": "Other",
+            "prefer-not-to-say": "Prefer Not to Say",
+        }
+
+        return labels.get((value or "").lower(), "Not Specified")
+
     def impact_to_score(value: str) -> int:
 
         mapping = {
@@ -160,9 +171,9 @@ def transform_analysis_to_report(analysis: dict) -> dict:
             analysis["overall"]["rating"],
 
         "user": {
-            "name": "Assessment User",
+            "name": analysis.get("name") or "Assessment User",
             "age": analysis["cognitiveAge"]["actualAge"],
-            "gender": "Not Specified",
+            "gender": format_gender_display(analysis.get("gender")),
             "band": get_age_band(analysis["cognitiveAge"]["actualAge"]),
             "cognitive_age_display": get_cognitive_age_display(
                 age=analysis["cognitiveAge"]["actualAge"],

@@ -72,6 +72,8 @@ def _map_result_to_response(
     age: int,
     result: ScoringResult,
     prior_report: dict | None,
+    name: str | None = None,
+    gender: str | None = None,
 ) -> AnalyzeResponse:
     """Maps ScoringResult → AnalyzeResponse."""
 
@@ -126,6 +128,8 @@ def _map_result_to_response(
 
     return AnalyzeResponse(
         assessmentId=       assessment_id,
+        name=               name,
+        gender=             gender,
         overall=            OverallScore(score=result.overall_score, rating=result.rating),
         domains=            domains,
         lifestyleImpacts=   impacts,
@@ -167,4 +171,6 @@ async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
         age=request.age,
         result=result,
         prior_report=request.priorReport,
+        name=request.name,
+        gender=request.gender,
     )

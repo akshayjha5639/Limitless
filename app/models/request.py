@@ -46,6 +46,7 @@ class BrandingParams(BaseModel):
 
 class AnalyzeRequest(BaseModel):
     assessmentId: str = Field(..., description="UUID from /generate-questions")
+    name: Optional[str] = Field(default=None, max_length=100, description="Optional display name for the report")
     age: int = Field(..., ge=18, le=66)
     gender: GenderType
     responses: list[ResponseItem] = Field(..., min_length=1, max_length=28)
