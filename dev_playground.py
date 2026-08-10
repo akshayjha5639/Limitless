@@ -12,12 +12,19 @@ Feature flags are set as environment variables BEFORE app.core.config is
 imported (config reads env at import time, and python-dotenv does not
 override already-set env vars), so the CLI flags below genuinely take effect.
 
+The playground starts with v2 and every feature flag ON, because that is what
+it exists to demonstrate. This is a launcher default only — app/core/config.py
+keeps its v1-safe defaults, so production (app.main:app) is unaffected.
+
 Usage:
-    python dev_playground.py                          # v1, all flags off (production default)
-    python dev_playground.py --model v2               # v2, all flags off
-    python dev_playground.py --model v2 --all-flags   # v2, every flag on
-    python dev_playground.py --model v2 --validity --confidence
+    python dev_playground.py                       # v2, every flag on (default)
+    python dev_playground.py --model v1            # v1 scoring, flags still on
+    python dev_playground.py --no-flags            # v2, every flag off
+    python dev_playground.py --model v1 --no-flags # production default
+    python dev_playground.py --no-validity         # all on except validity
     python dev_playground.py --port 8080
+
+Every flag is also toggleable live from the UI without a restart.
 
 Then open:  http://127.0.0.1:8000/playground
 """
@@ -37,18 +44,19 @@ def _bool_env(value: bool) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Limitless dev playground")
-    parser.add_argument("--model", choices=["v1", "v2"], default="v1",
-                        help="SCORING_MODEL_VERSION (default: v1)")
-    parser.add_argument("--confidence", action="store_true",
-                        help="ENABLE_CONFIDENCE_INTERVALS")
-    parser.add_argument("--validity", action="store_true",
-                        help="ENABLE_VALIDITY_CHECKS")
-    parser.add_argument("--reliable-change", action="store_true",
-                        help="ENABLE_RELIABLE_CHANGE")
-    parser.add_argument("--methodology", action="store_true",
-                        help="ENABLE_METHODOLOGY_PAGE")
-    parser.add_argument("--all-flags", action="store_true",
-                        help="Turn on every v2 feature flag")
+    bool_flag = argparse.BooleanOptionalAction  # gives --x / --no-x
+    parser.add_argument("--model", choices=["v1", "v2"], default="v2",
+                        help="SCORING_MODEL_VERSION (default: v2)")
+    parser.add_argument("--confidence", action=bool_flag, default=True,
+                        help="ENABLE_CONFIDENCE_INTERVALS (default: on)")
+    parser.add_argument("--validity", action=bool_flag, default=True,
+                        help="ENABLE_VALIDITY_CHECKS (default: on)")
+    parser.add_argument("--reliable-change", action=bool_flag, default=True,
+                        help="ENABLE_RELIABLE_CHANGE (default: on)")
+    parser.add_argument("--methodology", action=bool_flag, default=True,
+                        help="ENABLE_METHODOLOGY_PAGE (default: on)")
+    parser.add_argument("--no-flags", action="store_true",
+                        help="Turn every feature flag off (model is unaffected)")
     parser.add_argument("--item-bank", default=None, help="ITEM_BANK_VERSION")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
@@ -59,11 +67,12 @@ def main() -> int:
         return 1
 
     # --- Set flags BEFORE importing the app (config reads env at import time) ---
+    on = not args.no_flags  # --no-flags is a blanket override of the per-flag values
     os.environ["SCORING_MODEL_VERSION"] = args.model
-    os.environ["ENABLE_CONFIDENCE_INTERVALS"] = _bool_env(args.all_flags or args.confidence)
-    os.environ["ENABLE_VALIDITY_CHECKS"] = _bool_env(args.all_flags or args.validity)
-    os.environ["ENABLE_RELIABLE_CHANGE"] = _bool_env(args.all_flags or args.reliable_change)
-    os.environ["ENABLE_METHODOLOGY_PAGE"] = _bool_env(args.all_flags or args.methodology)
+    os.environ["ENABLE_CONFIDENCE_INTERVALS"] = _bool_env(on and args.confidence)
+    os.environ["ENABLE_VALIDITY_CHECKS"] = _bool_env(on and args.validity)
+    os.environ["ENABLE_RELIABLE_CHANGE"] = _bool_env(on and args.reliable_change)
+    os.environ["ENABLE_METHODOLOGY_PAGE"] = _bool_env(on and args.methodology)
     if args.item_bank:
         os.environ["ITEM_BANK_VERSION"] = args.item_bank
 
