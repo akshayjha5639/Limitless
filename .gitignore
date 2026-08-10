@@ -1,7 +1,19 @@
+# Secrets
 .env
-*__pycache__\
+.env.*
+!.env.example
+
+# Python
+__pycache__/
 *.pyc
 *.pyo
-venv\
-.env\
-__pycache__/\n*.pyc\n*.pyo\nvenv/\n.env\n
+*.egg-info/
+.pytest_cache/
+
+# Virtualenvs
+venv/
+.venv/
+env/
+
+# Generated report output (regenerate with dev_playground.py)
+*.pdf

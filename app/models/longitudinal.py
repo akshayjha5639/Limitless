@@ -74,6 +74,12 @@ class ContextualInsights(BaseModel):
     dynamic_recommendations: list[str]
 
 
+class ReliableChangeEntry(BaseModel):
+    delta: float
+    rci:   float
+    flag:  str
+
+
 class LongitudinalResponse(BaseModel):
     user_id: str
     aggregation_timestamp: str
@@ -82,3 +88,7 @@ class LongitudinalResponse(BaseModel):
     longitudinal_telemetry: LongitudinalTelemetry
     predictive_projections_calibrated: dict[str, float]
     contextual_ai_insights: ContextualInsights
+    # Phase 5, additive — empty dict / False when not both of the two most
+    # recent sessions are v2 (see longitudinal_engine.compute_reliable_change)
+    reliable_change: dict[str, ReliableChangeEntry] = Field(default_factory=dict)
+    retest_interval_warning: bool = False

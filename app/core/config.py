@@ -26,6 +26,14 @@ class Settings:
     PDF_ACCENT_COLOR:  str = os.getenv("PDF_ACCENT_COLOR",  "#00C2CB")
     PDF_FOOTER_NOTE:   str = os.getenv("PDF_FOOTER_NOTE",   "Limitless Platform • v1.0")
 
+    # v2 scoring model — feature flags (all default to v1-safe / off)
+    SCORING_MODEL_VERSION:       str  = os.getenv("SCORING_MODEL_VERSION", "v1")
+    ENABLE_CONFIDENCE_INTERVALS: bool = os.getenv("ENABLE_CONFIDENCE_INTERVALS", "false").lower() == "true"
+    ENABLE_VALIDITY_CHECKS:      bool = os.getenv("ENABLE_VALIDITY_CHECKS", "false").lower() == "true"
+    ENABLE_RELIABLE_CHANGE:      bool = os.getenv("ENABLE_RELIABLE_CHANGE", "false").lower() == "true"
+    ENABLE_METHODOLOGY_PAGE:     bool = os.getenv("ENABLE_METHODOLOGY_PAGE", "false").lower() == "true"
+    ITEM_BANK_VERSION:           str  = os.getenv("ITEM_BANK_VERSION", "items_v1.0")
+
     def validate(self):
         """Call on startup to catch missing critical vars early."""
         if not self.GEMINI_API_KEY:

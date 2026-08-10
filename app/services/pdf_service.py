@@ -18,6 +18,7 @@ from io import BytesIO
 from reportlab.lib.pagesizes import A4
 from app.services.report_mapper import transform_analysis_to_report
 from app.scoring.engine import get_age_band
+from app.core.config import settings
 # ============================================================
 # PAGE CONFIG
 # ============================================================
@@ -57,6 +58,18 @@ BACKGROUND     = HexColor("#F1F5F9")
 CARD_BG        = HexColor("#FFFFFF")
 BORDER_COLOR   = HexColor("#E2E8F0")
 SURFACE        = HexColor("#F8FAFC")
+
+# Display truncation for narrow chart axes (radar spokes, distribution bars).
+# Long v2 scale names would otherwise overrun their allotted width.
+SHORT_LABELS = {
+    # v1 legacy domains
+    "Problem Solving": "Problem", "Reaction Time": "Reaction",
+    # v2 scales
+    "Attention & Focus": "Attention", "Memory & Recall": "Memory",
+    "Executive Function": "Executive", "Mental Energy": "Energy",
+    "Stress & Emotional Load": "Stress", "Sleep & Recovery": "Sleep",
+    "Lifestyle Module": "Lifestyle",
+}
 
 STRENGTH_BADGES = {
     "Reaction Time":   {"badge": "Fast Thinker",            "icon": "⚡"},
@@ -106,6 +119,35 @@ def score_emoji(score):
 
 def clamp(val, lo, hi):
     return max(lo, min(hi, val))
+
+
+def fit_font_size(c, text, font, max_size, max_width, min_size=6.0, step=0.5):
+    """Largest size in [min_size, max_size] at which `text` fits `max_width`.
+
+    Used instead of hardcoding a smaller font: short values keep the full
+    display size and only genuinely wide ones (e.g. "72.35" vs "72") shrink,
+    so the visual hierarchy is preserved for the common case.
+    """
+    size = float(max_size)
+    while size > min_size and c.stringWidth(text, font, size) > max_width:
+        size -= step
+    return max(size, min_size)
+
+
+def draw_text_fitted(c, text, x, y, font, max_size, max_width,
+                     color=None, align="left", min_size=6.0):
+    """Draw text shrunk just enough to fit `max_width`. Returns the size used."""
+    size = fit_font_size(c, text, font, max_size, max_width, min_size)
+    c.setFont(font, size)
+    if color is not None:
+        c.setFillColor(color)
+    if align == "center":
+        c.drawCentredString(x, y, text)
+    elif align == "right":
+        c.drawRightString(x, y, text)
+    else:
+        c.drawString(x, y, text)
+    return size
 
 # ============================================================
 # LOW-LEVEL DRAW PRIMITIVES
@@ -217,22 +259,37 @@ def draw_large_gauge(c, cx, cy, radius, score):
     c.arc(cx - radius, cy - radius, cx + radius, cy + radius,
           startAng=0, extent=360)
 
-    # Score arc
+    # Score arc. A zero-length extent makes ReportLab's bezierArc divide by
+    # sin(0), so a score of 0 (all-severe responses) is drawn as no arc
+    # rather than raising ZeroDivisionError.
     arc_color = score_color(score)
-    c.setStrokeColor(arc_color)
-    c.setLineWidth(18)
-    angle = (score / 100) * 360
-    c.arc(cx - radius, cy - radius, cx + radius, cy + radius,
-          startAng=90, extent=-angle)
+    angle = (clamp(score, 0, 100) / 100) * 360
+    if angle > 0.01:
+        c.setStrokeColor(arc_color)
+        c.setLineWidth(18)
+        c.arc(cx - radius, cy - radius, cx + radius, cy + radius,
+              startAng=90, extent=-angle)
 
     # Center white circle
+    inner_r = radius - 22
     c.setFillColor(Color(1, 1, 1, alpha=0.12))
-    c.circle(cx, cy, radius - 22, stroke=0, fill=1)
+    c.circle(cx, cy, inner_r, stroke=0, fill=1)
 
-    # Score number
+    # Score number — sized to fit the inner circle.
+    # "72" keeps the full 52pt display size; wider values such as "72.35"
+    # shrink just enough to stay clear of the outer gauge ring.
+    score_text = str(score)
+    BASE_SIZE = 52
+    CAP_RATIO = 0.717                      # Helvetica-Bold cap height
+    max_text_w = inner_r * 2 * 0.80        # chord width with padding
+    size = fit_font_size(c, score_text, FONT_BOLD, BASE_SIZE, max_text_w, min_size=20)
+    # Hold the digits' optical centre where the full-size version sits, so
+    # the number stays vertically centred and the hierarchy is unchanged.
+    optical_centre_y = cy + 12 + BASE_SIZE * CAP_RATIO / 2
+    baseline_y = optical_centre_y - size * CAP_RATIO / 2
     c.setFillColor(white)
-    c.setFont(FONT_BOLD, 52)
-    c.drawCentredString(cx, cy + 12, str(score))
+    c.setFont(FONT_BOLD, size)
+    c.drawCentredString(cx, baseline_y, score_text)
 
     # /100
     c.setFont(FONT, 14)
@@ -464,9 +521,14 @@ def draw_cover_page(c, data):
         c.line(sep_x, uy + 14, sep_x, uy + 66)
 
     # ── KPI METRICS STRIP ──
+    # Sourced from the active vocabulary (7 v2 scales / 8 legacy domains);
+    # the KPI tile captions stay short and stable across both.
+    _active = data.get("radar_domains") or data["domains"]
+    _mem = "Memory & Recall" if "Memory & Recall" in _active else "Memory"
+    _att = "Attention & Focus" if "Attention & Focus" in _active else "Attention"
     metrics = [
-        ("Memory",    data["domains"]["Memory"],     "Brain"),
-        ("Attention", data["domains"]["Attention"],   "Focus"),
+        ("Memory",    _active[_mem],                 "Brain"),
+        ("Attention", _active[_att],                  "Focus"),
         ("Sleep",     data["lifestyle"]["Sleep"],     "Recovery"),
         ("Stress",    data["lifestyle"]["Stress"],    "Load"),
     ]
@@ -596,7 +658,9 @@ def draw_cover_page(c, data):
     c.roundRect(MARGIN, PAGE_HEIGHT - 780, PAGE_WIDTH - MARGIN * 2, 72, 14, fill=1, stroke=0)
 
     insights_text = [
-        ("8", "Cognitive Domains Analyzed"),
+        (str(len(_active)),
+         "Cognitive Scales Analyzed" if data.get("model_version") == "v2"
+         else "Cognitive Domains Analyzed"),
         ("4", "Lifestyle Factors Assessed"),
         ("30", "Day Improvement Plan"),
         ("AI", "Powered Insights"),
@@ -619,205 +683,25 @@ def draw_cover_page(c, data):
     c.drawCentredString(PAGE_WIDTH / 2, 13,
                         "Generated by Limitless AI  ·  Confidential  ·  Not a Clinical Diagnosis")
 
+    # Item 5 (v2 only, additive): response quality badge, in the empty strip
+    # just above the footer bar — the footer bar itself is untouched.
+    validity_status = data.get("validity_status")
+    if settings.ENABLE_VALIDITY_CHECKS and validity_status:
+        badge_color = {
+            "Valid":           SUCCESS,
+            "Review":          WARNING,
+            "Low confidence":  DANGER,
+        }.get(validity_status, TEXT_MUTED)
+        label = f"Response Quality: {validity_status}"
+        c.setFont(FONT_BOLD, 9)
+        badge_w = c.stringWidth(label, FONT_BOLD, 9) + 20
+        draw_tag(c, PAGE_WIDTH / 2 - badge_w / 2, 40, label, badge_color, white, width=badge_w, height=20, radius=8)
+
 
 # ============================================================
 # PAGE 2 — EXECUTIVE SUMMARY
 # ============================================================
 
-# def draw_executive_summary(c, data):
-#     draw_page_header(c, "Executive Summary",
-#                      "Complete overview of your cognitive wellness assessment", 2)
-#     draw_page_footer(c, data["report_id"])
-
-#     y_start = PAGE_HEIGHT - 90
-
-#     # ── ROW 1: Score card + Risk card + AI Summary ──
-#     sc_x, sc_y, sc_w, sc_h = MARGIN, y_start - 130, 135, 125
-#     draw_card(c, sc_x, sc_y, sc_w, sc_h, radius=14)
-#     draw_text(c, "Wellness Score", sc_x + 12, sc_y + sc_h - 18, 9,
-#               FONT, TEXT_SECONDARY)
-#     c.setFont(FONT_BOLD, 44)
-#     c.setFillColor(score_color(data["overall_score"]))
-#     c.drawCentredString(sc_x + sc_w / 2, sc_y + 60, str(data["overall_score"]))
-#     c.setFont(FONT, 10)
-#     c.setFillColor(TEXT_MUTED)
-#     c.drawCentredString(sc_x + sc_w / 2, sc_y + 44, "out of 100")
-#     draw_progress_bar(c, sc_x + 12, sc_y + 20, sc_w - 24, 8, data["overall_score"])
-
-#     # Risk classification card
-#     rx, ry, rw, rh = sc_x + sc_w + 10, y_start - 130, 130, 125
-#     risk_score = data["overall_score"]
-#     draw_card(c, rx, ry, rw, rh, radius=14)
-#     draw_text(c, "Risk Level", rx + 12, ry + rh - 18, 9, FONT, TEXT_SECONDARY)
-#     status = score_status(risk_score)
-#     col = score_color(risk_score)
-#     c.setFillColor(score_color_light(risk_score))
-#     c.roundRect(rx + 12, ry + 50, rw - 24, 42, 10, fill=1, stroke=0)
-#     c.setFillColor(col)
-#     c.setFont(FONT_BOLD, 13)
-#     c.drawCentredString(rx + rw / 2, ry + 75, status)
-#     c.setFont(FONT, 9)
-#     c.setFillColor(TEXT_SECONDARY)
-#     c.drawCentredString(rx + rw / 2, ry + 62, "Classification")
-#     levels = ["At Risk", "Needs Attention", "Good", "Excellent"]
-#     dot_y = ry + 34
-#     for li, lv in enumerate(levels):
-#         lx = rx + 12 + li * (rw - 24) / 4
-#         col_dot = [DANGER, WARNING, PRIMARY, SUCCESS][li]
-#         is_active = lv == status
-#         c.setFillColor(col_dot)
-#         c.circle(lx + 10, dot_y, 6 if is_active else 4, fill=1, stroke=0)
-#         if is_active:
-#             c.setStrokeColor(col_dot)
-#             c.setLineWidth(1.5)
-#             c.circle(lx + 10, dot_y, 9, fill=0, stroke=1)
-
-#     # AI Summary card
-#     ai_x = rx + rw + 10
-#     ai_y = y_start - 130
-#     ai_w = PAGE_WIDTH - MARGIN - ai_x
-#     ai_h = 125
-#     draw_card(c, ai_x, ai_y, ai_w, ai_h, radius=14)
-#     c.setFillColor(Color(37/255, 99/255, 235/255, alpha=0.1))
-#     c.roundRect(ai_x + 12, ai_y + ai_h - 26, 42, 18, 8, fill=1, stroke=0)
-#     c.setFillColor(PRIMARY)
-#     c.setFont(FONT_BOLD, 8)
-#     c.drawCentredString(ai_x + 33, ai_y + ai_h - 20, "AI ✦")
-#     summary_text = data["executive_summary"]["summary"]
-#     c.setFont(FONT, 10.5)
-#     c.setFillColor(TEXT_SECONDARY)
-#     wrap_text_in_box(c, summary_text, ai_x + 12, ai_y + ai_h - 30,
-#                      ai_w - 24, 10.5, line_height=15, max_lines=7)
-
-#     # ── SCORE BREAKDOWN TABLE ──
-#     bd = data.get("score_breakdown", [])
-#     tbl_y     = y_start - 148          # sits just below row 1
-#     row_h     = 18
-#     tbl_h     = row_h * (len(bd) + 1)+5  # +1 for header
-#     tbl_w     = PAGE_WIDTH - MARGIN * 2
-
-#     draw_card(c, MARGIN, tbl_y - tbl_h, tbl_w, tbl_h, radius=10)
-
-#     # Column x positions
-#     cx_domain = MARGIN + 14
-#     cx_weight = MARGIN + 200
-#     cx_score  = MARGIN + 290
-#     cx_bar    = MARGIN + 350
-#     cx_contrib= MARGIN + tbl_w - 14
-
-#     bar_max_w = cx_contrib - cx_bar - 40
-
-#     # Header row
-#     hdr_y = tbl_y - row_h + 4
-#     c.setFillColor(PRIMARY)
-#     c.roundRect(MARGIN, tbl_y - row_h, tbl_w, row_h, 10, fill=1, stroke=0)
-#     c.setFillColor(white)
-#     c.setFont(FONT_BOLD, 8)
-#     c.drawString(cx_domain,  hdr_y, "DOMAIN")
-#     c.drawString(cx_weight,  hdr_y, "WEIGHT")
-#     c.drawString(cx_score,   hdr_y, "SCORE")
-#     c.drawString(cx_bar,     hdr_y, "PERFORMANCE")
-#     c.drawRightString(cx_contrib, hdr_y, "CONTRIBUTION")
-
-#     # Data rows
-#     for ri, row in enumerate(bd):
-#         ry2    = tbl_y - row_h * (ri + 2)
-#         row_bg = SURFACE if ri % 2 == 0 else CARD_BG
-#         c.setFillColor(row_bg)
-#         c.rect(MARGIN, ry2, tbl_w, row_h, fill=1, stroke=0)
-
-#         # Left color strip
-#         c.setFillColor(score_color(row["score"]))
-#         c.rect(MARGIN, ry2, 3, row_h, fill=1, stroke=0)
-
-#         text_y = ry2 + 5
-
-#         # Domain name
-#         c.setFont(FONT_BOLD, 8)
-#         c.setFillColor(TEXT_PRIMARY)
-#         c.drawString(cx_domain, text_y, row["domain"])
-
-#         # Weight
-#         c.setFont(FONT, 8)
-#         c.setFillColor(TEXT_MUTED)
-#         c.drawString(cx_weight, text_y, f"{row['weight_pct']}%")
-
-#         # Score
-#         c.setFont(FONT_BOLD, 8)
-#         c.setFillColor(score_color(row["score"]))
-#         c.drawString(cx_score, text_y, str(row["score"]))
-
-#         # Mini progress bar
-#         draw_progress_bar(c, cx_bar, ry2 + 5, bar_max_w, 7, row["score"])
-
-#         # Contribution
-#         c.setFont(FONT_BOLD, 8)
-#         c.setFillColor(TEXT_PRIMARY)
-#         c.drawRightString(cx_contrib, text_y, f"{row['contribution']} pts")
-
-#     # Bottom border line on table
-#     c.setStrokeColor(BORDER_COLOR)
-#     c.setLineWidth(0.5)
-#     c.line(MARGIN, tbl_y - tbl_h, MARGIN + tbl_w, tbl_y - tbl_h)
-
-#     # ── KEY FINDINGS ──
-#     kf_y = tbl_y - tbl_h - 18          # pushed down below table
-#     kf_h = 140
-#     draw_card(c, MARGIN, kf_y - kf_h, PAGE_WIDTH - MARGIN * 2, kf_h, radius=14)
-#     draw_text(c, "Key Findings", MARGIN + 16, kf_y - 18, 13, FONT_BOLD)
-#     draw_divider(c, MARGIN + 16, kf_y - 28, PAGE_WIDTH - MARGIN * 2 - 32)
-
-#     findings = data["executive_summary"]["key_findings"]
-#     cols     = 2
-#     col_w    = (PAGE_WIDTH - MARGIN * 2 - 32) / cols
-#     for fi, finding in enumerate(findings[:4]):
-#         fx = MARGIN + 16 + (fi % cols) * col_w
-#         fy = kf_y - 52 - (fi // cols) * 40
-#         c.setFillColor(PRIMARY)
-#         c.circle(fx + 8, fy + 5, 4, fill=1, stroke=0)
-#         c.setFillColor(white)
-#         c.circle(fx + 8, fy + 5, 2, fill=1, stroke=0)
-#         c.setFont(FONT, 10)
-#         c.setFillColor(TEXT_PRIMARY)
-#         wrap_text_in_box(c, finding, fx + 20, fy + 8,
-#                          col_w - 40, 10, line_height=12, max_lines=2)
-
-#     # ── PRIORITY AREAS + STRENGTHS ──
-#     pa_y  = kf_y - kf_h - 14
-#     pa_h  = 138
-#     half_w = (PAGE_WIDTH - MARGIN * 2 - 10) / 2
-
-#     # Priority areas
-#     draw_card(c, MARGIN, pa_y - pa_h, half_w, pa_h, radius=14)
-#     draw_text(c, "⚠  Priority Areas", MARGIN + 16, pa_y - 18, 12, FONT_BOLD, WARNING)
-#     draw_divider(c, MARGIN + 16, pa_y - 28, half_w - 32)
-#     for pi, area in enumerate(data["executive_summary"]["priority_areas"][:4]):
-#         ay = pa_y - 52 - pi * 22
-#         rank_colors = [DANGER, WARNING, WARNING, PRIMARY]
-#         c.setFillColor(rank_colors[pi] if pi < len(rank_colors) else TEXT_SECONDARY)
-#         c.roundRect(MARGIN + 16, ay - 4, 20, 14, 4, fill=1, stroke=0)
-#         c.setFillColor(white)
-#         c.setFont(FONT_BOLD, 7)
-#         c.drawCentredString(MARGIN + 26, ay + 3, str(pi + 1))
-#         c.setFont(FONT, 10)
-#         c.setFillColor(TEXT_PRIMARY)
-#         c.drawString(MARGIN + 42, ay + 2, area)
-
-#     # Strengths
-#     sx = MARGIN + half_w + 10
-#     draw_card(c, sx, pa_y - pa_h, half_w, pa_h, radius=14)
-#     draw_text(c, "★  Cognitive Strengths", sx + 16, pa_y - 18, 12, FONT_BOLD, SUCCESS)
-#     draw_divider(c, sx + 16, pa_y - 28, half_w - 32)
-#     for si, strength in enumerate(data["executive_summary"]["strongest_areas"][:4]):
-#         sy_item = pa_y - 52 - si * 22
-#         c.setFillColor(SUCCESS)
-#         c.roundRect(sx + 16, sy_item - 4, 20, 14, 4, fill=1, stroke=0)
-#         c.setFillColor(white)
-#         c.setFont(FONT_BOLD, 7)
-#         c.drawCentredString(sx + 26, sy_item + 3, str(si + 1))
-#         c.setFont(FONT, 10)
-#         c.setFillColor(TEXT_PRIMARY)
-#         c.drawString(sx + 42, sy_item + 2, strength)
 def draw_executive_summary(c, data):
     draw_page_header(c, "Executive Summary",
                      "Complete overview of your cognitive wellness assessment", 2)
@@ -825,11 +709,23 @@ def draw_executive_summary(c, data):
 
     y_start = PAGE_HEIGHT - 90
 
+    # ------------------------------------------------------------
+    # Page budget. "Priority Areas" and "Cognitive Strengths" were
+    # removed, so the freed vertical space is redistributed across the
+    # remaining sections instead of leaving a gap at the bottom.
+    # Key Findings takes the remainder, which keeps the page full for
+    # both the 8-domain (v1) and 7-scale (v2) breakdown tables.
+    # ------------------------------------------------------------
+    SEC_GAP      = 12
+    BOTTOM_LIMIT = 44          # 32pt footer + breathing room
+    tl_h         = 62
+    row1_h       = 150
+    bm_h         = 128
+
     # ============================================================
     # TRAFFIC LIGHT SUMMARY
     # ============================================================
     tl      = data.get("traffic_light", {"green": [], "yellow": [], "red": []})
-    tl_h    = 62
     tl_y    = y_start
     tl_w    = PAGE_WIDTH - MARGIN * 2
     col3_w  = tl_w / 3
@@ -880,36 +776,40 @@ def draw_executive_summary(c, data):
     # ============================================================
     # ROW 1: Score card + Risk card + AI Summary
     # ============================================================
-    row1_y = tl_y - tl_h 
+    row1_y = tl_y - tl_h - SEC_GAP
 
-    sc_x, sc_y, sc_w, sc_h = MARGIN, row1_y - 125, 135, 120
+    sc_x, sc_y, sc_w, sc_h = MARGIN, row1_y - row1_h, 135, row1_h
     draw_card(c, sc_x, sc_y, sc_w, sc_h, radius=14)
     draw_text(c, "Wellness Score", sc_x + 12, sc_y + sc_h - 18, 9,
               FONT, TEXT_SECONDARY)
-    c.setFont(FONT_BOLD, 42)
-    c.setFillColor(score_color(data["overall_score"]))
-    c.drawCentredString(sc_x + sc_w / 2, sc_y + 58, str(data["overall_score"]))
+    # Score is fitted to the card so two-decimal values cannot spill out.
+    draw_text_fitted(c, str(data["overall_score"]),
+                     sc_x + sc_w / 2, sc_y + sc_h * 0.46,
+                     FONT_BOLD, 42, sc_w - 28,
+                     color=score_color(data["overall_score"]),
+                     align="center", min_size=22)
     c.setFont(FONT, 10)
     c.setFillColor(TEXT_MUTED)
-    c.drawCentredString(sc_x + sc_w / 2, sc_y + 42, "out of 100")
-    draw_progress_bar(c, sc_x + 12, sc_y + 18, sc_w - 24, 8, data["overall_score"])
+    c.drawCentredString(sc_x + sc_w / 2, sc_y + sc_h * 0.46 - 16, "out of 100")
+    draw_progress_bar(c, sc_x + 12, sc_y + 22, sc_w - 24, 8, data["overall_score"])
 
     # Risk classification card
-    rx, ry, rw, rh = sc_x + sc_w + 10, row1_y - 125, 130, 120
+    rx, ry, rw, rh = sc_x + sc_w + 10, row1_y - row1_h, 130, row1_h
     draw_card(c, rx, ry, rw, rh, radius=14)
     draw_text(c, "Risk Level", rx + 12, ry + rh - 18, 9, FONT, TEXT_SECONDARY)
     status = score_status(data["overall_score"])
     col    = score_color(data["overall_score"])
+    band_y = ry + rh * 0.40
     c.setFillColor(score_color_light(data["overall_score"]))
-    c.roundRect(rx + 12, ry + 48, rw - 24, 40, 10, fill=1, stroke=0)
+    c.roundRect(rx + 12, band_y, rw - 24, 40, 10, fill=1, stroke=0)
     c.setFillColor(col)
     c.setFont(FONT_BOLD, 12)
-    c.drawCentredString(rx + rw / 2, ry + 72, status)
+    c.drawCentredString(rx + rw / 2, band_y + 24, status)
     c.setFont(FONT, 9)
     c.setFillColor(TEXT_SECONDARY)
-    c.drawCentredString(rx + rw / 2, ry + 60, "Classification")
+    c.drawCentredString(rx + rw / 2, band_y + 12, "Classification")
     levels = ["At Risk", "Needs Attention", "Good", "Excellent"]
-    dot_y  = ry + 32
+    dot_y  = band_y - 16
     for li, lv in enumerate(levels):
         lx      = rx + 12 + li * (rw - 24) / 4
         col_dot = [DANGER, WARNING, PRIMARY, SUCCESS][li]
@@ -923,26 +823,34 @@ def draw_executive_summary(c, data):
 
     # AI Summary card
     ai_x = rx + rw + 10
-    ai_y = row1_y - 125
+    ai_y = row1_y - row1_h
     ai_w = PAGE_WIDTH - MARGIN - ai_x
-    ai_h = 120
+    ai_h = row1_h
     draw_card(c, ai_x, ai_y, ai_w, ai_h, radius=14)
+    ai_badge_y = ai_y + ai_h - 24            # badge occupies +ai_h-24 .. +ai_h-8
     c.setFillColor(Color(37/255, 99/255, 235/255, alpha=0.1))
-    c.roundRect(ai_x + 12, ai_y + ai_h - 24, 42, 16, 8, fill=1, stroke=0)
+    c.roundRect(ai_x + 12, ai_badge_y, 42, 16, 8, fill=1, stroke=0)
     c.setFillColor(PRIMARY)
     c.setFont(FONT_BOLD, 8)
     c.drawCentredString(ai_x + 33, ai_y + ai_h - 18, "AI ✦")
+    # Paragraph starts a clear 12pt below the badge (it previously began at
+    # ai_h-28, whose ascenders ran straight through the icon), and the line
+    # budget is derived from the space actually left in the card.
+    ai_line_h    = 14
+    ai_text_top  = ai_badge_y - 12
+    ai_text_bot  = ai_y + 14
+    ai_max_lines = max(1, int((ai_text_top - ai_text_bot) / ai_line_h))
     c.setFont(FONT, 10)
     c.setFillColor(TEXT_SECONDARY)
     wrap_text_in_box(c, data["executive_summary"]["summary"],
-                     ai_x + 12, ai_y + ai_h - 28,
-                     ai_w - 24, 10, line_height=14, max_lines=6)
+                     ai_x + 12, ai_text_top,
+                     ai_w - 24, 10, line_height=ai_line_h, max_lines=ai_max_lines)
 
     # ============================================================
     # SCORE BREAKDOWN TABLE
     # ============================================================
     bd    = data.get("score_breakdown", [])
-    tbl_y = row1_y - 125 - 12
+    tbl_y = row1_y - row1_h - SEC_GAP
     row_h = 18
     tbl_h = row_h * (len(bd) + 1) + 5
     tbl_w = PAGE_WIDTH - MARGIN * 2
@@ -997,15 +905,14 @@ def draw_executive_summary(c, data):
     # BENCHMARK COMPARISON
     # ============================================================
     bm   = data.get("benchmarks", {})
-    bm_y = tbl_y - tbl_h - 16
-    bm_h = 84
+    bm_y = tbl_y - tbl_h - SEC_GAP
     draw_card(c, MARGIN, bm_y - bm_h, PAGE_WIDTH - MARGIN * 2, bm_h, radius=12)
 
     draw_text(c, "How You Compare", MARGIN + 16, bm_y - 14, 11, FONT_BOLD)
     c.setFont(FONT, 8)
     c.setFillColor(TEXT_MUTED)
     c.drawString(MARGIN + 16, bm_y - 26,
-                 f"vs {bm.get('gender_label','')} {bm.get('band_label','your age group')}")
+                 f"vs {bm.get('band_label','your age group')}")
 
     pct = bm.get("percentile", 50)
     c.setFillColor(score_color(pct))
@@ -1014,14 +921,21 @@ def draw_executive_summary(c, data):
     c.setFont(FONT_BOLD, 10)
     c.drawCentredString(PAGE_WIDTH - MARGIN - 50, bm_y - 23, f"Top {100 - pct}%")
 
+    # Both cohort averages are shown side by side rather than picking one by
+    # the user's gender. The "Top X%" badge above is still computed against
+    # the user's own cohort (see report_mapper.generate_benchmarks).
     bar_labels = [
-        ("You",          bm.get("user_score",   0), score_color(bm.get("user_score", 0))),
-        ("Peer Average", bm.get("peer_average", 0), TEXT_MUTED),
-        ("Top 10%",      bm.get("top_10_pct",   0), SUCCESS),
+        ("You",            bm.get("user_score",          0), score_color(bm.get("user_score", 0))),
+        ("Female Avg",     bm.get("peer_average_female", 0), SECONDARY_LIGHT),
+        ("Male Avg",       bm.get("peer_average_male",   0), PRIMARY_LIGHT),
+        ("Top 10%",        bm.get("top_10_pct",          0), SUCCESS),
     ]
     bm_bar_w = PAGE_WIDTH - MARGIN * 2 - 126
+    # Four rows now (both cohort averages); spacing derived from the card so
+    # the last bar keeps a real margin above the card edge.
+    bm_row_gap = (bm_h - 56) / len(bar_labels)
     for bi, (lbl, val, bcol) in enumerate(bar_labels):
-        by2 = bm_y - 42 - bi * 13
+        by2 = bm_y - 46 - bi * bm_row_gap
         c.setFont(FONT, 7.5)
         c.setFillColor(TEXT_SECONDARY)
         c.drawString(MARGIN + 16, by2 + 2, lbl)
@@ -1037,17 +951,21 @@ def draw_executive_summary(c, data):
     # ============================================================
     # KEY FINDINGS
     # ============================================================
-    kf_y = bm_y - bm_h - 12
-    kf_h = 118
+    # Key Findings absorbs the space freed by removing the two bottom cards,
+    # and shows as many findings as genuinely fit rather than a fixed 4.
+    kf_y = bm_y - bm_h - SEC_GAP
+    kf_h = max(96, (kf_y - BOTTOM_LIMIT))
     draw_card(c, MARGIN, kf_y - kf_h, PAGE_WIDTH - MARGIN * 2, kf_h, radius=14)
     draw_text(c, "Key Findings", MARGIN + 16, kf_y - 16, 12, FONT_BOLD)
     draw_divider(c, MARGIN + 16, kf_y - 26, PAGE_WIDTH - MARGIN * 2 - 32)
 
-    findings = data["executive_summary"]["key_findings"]
-    col_w    = (PAGE_WIDTH - MARGIN * 2 - 32) / 2
-    for fi, finding in enumerate(findings[:4]):
+    findings   = data["executive_summary"]["key_findings"]
+    col_w      = (PAGE_WIDTH - MARGIN * 2 - 32) / 2
+    kf_row_h   = 36
+    kf_rows    = max(1, int((kf_h - 46) / kf_row_h))
+    for fi, finding in enumerate(findings[:kf_rows * 2]):
         fx = MARGIN + 16 + (fi % 2) * col_w
-        fy = kf_y - 46 - (fi // 2) * 36
+        fy = kf_y - 46 - (fi // 2) * kf_row_h
         c.setFillColor(PRIMARY)
         c.circle(fx + 8, fy + 5, 4, fill=1, stroke=0)
         c.setFillColor(white)
@@ -1056,70 +974,52 @@ def draw_executive_summary(c, data):
         c.setFillColor(TEXT_PRIMARY)
         wrap_text_in_box(c, finding, fx + 20, fy + 8,
                          col_w - 40, 10, line_height=12, max_lines=2)
-
-    # ============================================================
-    # PRIORITY AREAS + STRENGTHS
-    # ============================================================
-    pa_y   = kf_y - kf_h - 10
-    pa_h   = 114
-    half_w = (PAGE_WIDTH - MARGIN * 2 - 10) / 2
-
-    draw_card(c, MARGIN, pa_y - pa_h, half_w, pa_h, radius=14)
-    draw_text(c, "⚠  Priority Areas", MARGIN + 16, pa_y - 16, 11, FONT_BOLD, WARNING)
-    draw_divider(c, MARGIN + 16, pa_y - 26, half_w - 32)
-    for pi, area in enumerate(data["executive_summary"]["priority_areas"][:4]):
-        ay = pa_y - 46 - pi * 20
-        rank_colors = [DANGER, WARNING, WARNING, PRIMARY]
-        c.setFillColor(rank_colors[pi] if pi < len(rank_colors) else TEXT_SECONDARY)
-        c.roundRect(MARGIN + 16, ay - 4, 20, 14, 4, fill=1, stroke=0)
-        c.setFillColor(white)
-        c.setFont(FONT_BOLD, 7)
-        c.drawCentredString(MARGIN + 26, ay + 3, str(pi + 1))
-        c.setFont(FONT, 10)
-        c.setFillColor(TEXT_PRIMARY)
-        c.drawString(MARGIN + 42, ay + 2, area)
-
-    sx = MARGIN + half_w + 10
-    draw_card(c, sx, pa_y - pa_h, half_w, pa_h, radius=14)
-    draw_text(c, "★  Cognitive Strengths", sx + 16, pa_y - 16, 11, FONT_BOLD, SUCCESS)
-    draw_divider(c, sx + 16, pa_y - 26, half_w - 32)
-    for si, strength in enumerate(data["executive_summary"]["strongest_areas"][:4]):
-        sy_item = pa_y - 46 - si * 20
-        c.setFillColor(SUCCESS)
-        c.roundRect(sx + 16, sy_item - 4, 20, 14, 4, fill=1, stroke=0)
-        c.setFillColor(white)
-        c.setFont(FONT_BOLD, 7)
-        c.drawCentredString(sx + 26, sy_item + 3, str(si + 1))
-        c.setFont(FONT, 10)
-        c.setFillColor(TEXT_PRIMARY)
-        c.drawString(sx + 42, sy_item + 2, strength)
 # ============================================================
 # PAGE 3 — CORE BRAIN FUNCTION ANALYSIS
 # ============================================================
 
 def draw_brain_analysis(c, data):
 
+    _n = len(data.get("radar_domains") or data["domains"])
+    _unit = "scales" if data.get("model_version") == "v2" else "cognitive domains"
     draw_page_header(
         c,
         "Core Brain Function Analysis",
-        "Detailed assessment across 8 cognitive domains",
+        f"Detailed assessment across {_n} {_unit}",
         3
     )
 
     draw_page_footer(c, data["report_id"])
 
     domains = data["domains"]
+    # Item 1 (radar): 7 v2 scales instead of 8 domains when v2 is active —
+    # falls back to the legacy `domains` dict itself when absent, so v1 (and
+    # v2 with SCORING_MODEL_VERSION output otherwise unset) is unaffected.
+    radar_domains = data.get("radar_domains") or domains
+    # Item 2 (scale bars): label -> {sem, ciLow, ciHigh}, only populated when
+    # v2 is active AND ENABLE_CONFIDENCE_INTERVALS is on.
+    scale_confidence = data.get("scale_confidence") or {}
 
     content_top = PAGE_HEIGHT - 88
-    content_bottom = 50
-    usable_h = content_top - content_bottom
+    content_bottom = 46
 
-    # ============================================================
-    # TOP OVERVIEW SECTION
-    # ============================================================
-
-    top_h = 230
-    top_y = content_top - top_h
+    # ------------------------------------------------------------
+    # Page 3 budget.
+    #
+    # The dashboard is laid out from its own content (header + one row per
+    # scale) and anchored to the bottom of the page; the overview card then
+    # takes all the remaining height. That pushes the dashboard down into
+    # the space that was previously empty below it, and lets the radar sit
+    # low enough that its upper labels ("Stress & Emotional Load") clear the
+    # "Cognitive Domain Overview" heading instead of colliding with it.
+    # ------------------------------------------------------------
+    SEC_GAP     = 16
+    n_rows      = max(1, len(radar_domains))
+    pb_row_gap  = 34
+    pb_card_h   = 62 + n_rows * pb_row_gap + 18
+    pb_y        = content_bottom + pb_card_h          # top edge of dashboard card
+    top_y       = pb_y + SEC_GAP
+    top_h       = content_top - top_y
 
     draw_card(
         c,
@@ -1148,23 +1048,27 @@ def draw_brain_analysis(c, data):
     # CENTERED RADAR CHART
     # ============================================================
 
-    radar_cx = PAGE_WIDTH / 2
-    radar_cy = top_y + 112
+    # Radar is centred in the card body (below the heading) and scaled to the
+    # card, so the label ring never reaches the heading above it.
+    radar_cx   = PAGE_WIDTH / 2
+    body_top   = content_top - 40          # under the "Cognitive Domain Overview" heading
+    body_bot   = top_y + 14
+    radar_cy   = (body_top + body_bot) / 2
+    # Label ring sits at radius + 28; keep the whole ring inside the body.
+    radar_r    = clamp((body_top - body_bot) / 2 - 30, 52, 88)
 
     draw_radar_chart(
         c,
         radar_cx,
         radar_cy,
-        68,   # bigger radar
-        domains,
+        radar_r,
+        radar_domains,
         show_values=True
     )
 
     # ============================================================
     # BOTTOM SECTION
     # ============================================================
-    pb_card_h = 248
-    pb_y      = 500
     draw_card(c, MARGIN, pb_y - pb_card_h,
               PAGE_WIDTH - MARGIN * 2, pb_card_h, radius=16)
 
@@ -1176,45 +1080,69 @@ def draw_brain_analysis(c, data):
                  "Primary visualization — progress bars show each domain score at a glance")
     draw_divider(c, MARGIN + 16, pb_y - 40, PAGE_WIDTH - MARGIN * 2 - 32)
 
-    bar_label_w = 100
-    bar_score_w = 32
-    bar_pct_w   = 32
-    bar_area_w  = PAGE_WIDTH - MARGIN * 2 - bar_label_w - bar_score_w - bar_pct_w - 32
-    bar_x_start = MARGIN + 16 + bar_label_w
-    row_gap     = 24
+    # ---- Row columns -------------------------------------------------
+    # Laid out right-to-left from the card edge so every column has a real
+    # reserved width:
+    #   [ label ][ bar ][ value (right-aligned) ][ status ]
+    # Previously the label column was 100pt while "Stress & Emotional Load"
+    # needs 106.5pt, so its final "d" was overdrawn by the bar; and the
+    # value sat only 26pt from the status text, so a "62 ± 9" value ran into
+    # "Good" / "Needs Attention" / "Risk" (which itself overflowed the page).
+    row_right    = PAGE_WIDTH - MARGIN - 16
+    status_w     = 58        # widest is "Needs Attention" (53.4pt @7.5)
+    status_x     = row_right - status_w
+    value_right  = status_x - 12
+    value_w      = 48        # widest is "100.0 ± 9" style values
+    bar_label_w  = 116       # widest is "Stress & Emotional Load" (106.5pt @9)
+    bar_x_start  = MARGIN + 16 + bar_label_w
+    bar_area_w   = (value_right - value_w - 10) - bar_x_start
+    bar_h        = 14
+    row_gap      = pb_row_gap
 
-    for di, (domain, value) in enumerate(domains.items()):
-        dy = pb_y - 58 - di * row_gap
+    for di, (domain, value) in enumerate(radar_domains.items()):
+        dy = pb_y - 62 - di * row_gap
 
-        # Domain label
-        c.setFont(FONT_BOLD, 9)
-        c.setFillColor(TEXT_PRIMARY)
-        c.drawString(MARGIN + 16, dy + 3, domain)
+        text_y = dy + (bar_h - 7) / 2
 
-        # Score number
-        c.setFont(FONT_BOLD, 9)
-        c.setFillColor(score_color(value))
-        c.drawString(bar_x_start + bar_area_w + 6, dy + 3, str(value))
+        # Domain label — fitted so an unusually long scale name shrinks
+        # slightly rather than running under the bar.
+        draw_text_fitted(c, domain, MARGIN + 16, text_y, FONT_BOLD, 9,
+                         bar_label_w - 10, color=TEXT_PRIMARY, min_size=7)
+
+        # Score value — right-aligned in its own column, clear of the status.
+        # "62 ± 6" when confidence intervals are on, else the plain score.
+        ci = scale_confidence.get(domain)
+        score_label = f"{value} ± {round(ci['sem'])}" if ci else str(value)
+        draw_text_fitted(c, score_label, value_right, text_y, FONT_BOLD, 9,
+                         value_w, color=score_color(value),
+                         align="right", min_size=7)
 
         # Status label
         c.setFont(FONT, 7.5)
         c.setFillColor(TEXT_MUTED)
-        c.drawString(bar_x_start + bar_area_w + 32, dy + 3, score_status(value))
+        c.drawString(status_x, text_y, score_status(value))
 
         # Progress bar track
         c.setFillColor(BORDER_COLOR)
-        c.roundRect(bar_x_start, dy, bar_area_w, 12, 6, fill=1, stroke=0)
+        c.roundRect(bar_x_start, dy, bar_area_w, bar_h, bar_h / 2, fill=1, stroke=0)
 
         # Fill
-        fill_w = max(12, (value / 100) * bar_area_w)
+        fill_w = max(bar_h, (value / 100) * bar_area_w)
         c.setFillColor(score_color(value))
-        c.roundRect(bar_x_start, dy, fill_w, 12, 6, fill=1, stroke=0)
+        c.roundRect(bar_x_start, dy, fill_w, bar_h, bar_h / 2, fill=1, stroke=0)
 
-        # Score pip markers at 25/50/75/100
+        # Score pip markers
         for pip in [25, 50, 70, 85]:
             pip_x = bar_x_start + (pip / 100) * bar_area_w
             c.setFillColor(BACKGROUND)
-            c.rect(pip_x - 0.5, dy, 1, 12, fill=1, stroke=0)
+            c.rect(pip_x - 0.5, dy, 1, bar_h, fill=1, stroke=0)
+
+        # Thin error band spanning ciLow..ciHigh, drawn on top of the fill
+        if ci:
+            band_x1 = bar_x_start + (clamp(ci["ciLow"], 0, 100) / 100) * bar_area_w
+            band_x2 = bar_x_start + (clamp(ci["ciHigh"], 0, 100) / 100) * bar_area_w
+            c.setFillColor(Color(0, 0, 0, alpha=0.18))
+            c.rect(band_x1, dy + bar_h / 2 - 2, max(band_x2 - band_x1, 1), 4, fill=1, stroke=0)
 
 
 
@@ -1222,123 +1150,7 @@ def draw_brain_analysis(c, data):
 # PAGE 4 — LIFESTYLE IMPACT ANALYSIS
 # ============================================================
 
-# def draw_lifestyle_page(c, data):
-#     draw_page_header(c, "Lifestyle Impact Analysis",
-#                      "How your daily habits are affecting cognitive performance", 4)
-#     draw_page_footer(c, data["report_id"])
 
-#     lifestyle = data["lifestyle"]
-#     content_top = PAGE_HEIGHT - 88
-
-#     lifestyle_meta = {
-#         "Sleep": {
-#             "icon": "☽",
-#             "desc": "Sleep quality directly impacts memory consolidation, "
-#                     "emotional regulation, and cognitive recovery.",
-#             "tip": "Aim for 7–9 hours of consistent, quality sleep.",
-#         },
-#         "Stress": {
-#             "icon": "⚡",
-#             "desc": "Chronic stress elevates cortisol, impairing "
-#                     "working memory and executive function over time.",
-#             "tip": "Daily mindfulness or breathing exercises can reduce stress load.",
-#         },
-#         "Anxiety": {
-#             "icon": "◎",
-#             "desc": "Anxiety diverts attentional resources and can "
-#                     "create cognitive bottlenecks during complex tasks.",
-#             "tip": "Structured worry time and CBT techniques show strong outcomes.",
-#         },
-#         "Burnout": {
-#             "icon": "▽",
-#             "desc": "Burnout depletes mental reserves and reduces "
-#                     "motivation, creativity, and sustained performance.",
-#             "tip": "Recovery blocks and workload distribution are essential.",
-#         },
-#     }
-
-#     card_w = (PAGE_WIDTH - MARGIN * 2 - 12) / 2
-#     card_h = 148
-#     positions = [
-#         (MARGIN,              content_top - card_h),
-#         (MARGIN + card_w + 12, content_top - card_h),
-#         (MARGIN,              content_top - card_h * 2 - 20),
-#         (MARGIN + card_w + 12, content_top - card_h * 2 - 20),
-#     ]
-
-#     for i, (key, val) in enumerate(lifestyle.items()):
-#         meta = lifestyle_meta.get(key, {})
-#         lx, ly = positions[i]
-#         draw_card(c, lx, ly, card_w, card_h, radius=14)
-
-#         # Top accent
-#         c.setFillColor(score_color(val))
-#         c.roundRect(lx, ly + card_h - 4, card_w, 4, 2, fill=1, stroke=0)
-
-#         # Icon + Title row
-#         c.setFont(FONT_BOLD, 16)
-#         c.setFillColor(TEXT_PRIMARY)
-#         c.drawString(lx + 14, ly + card_h - 28, f"{meta.get('icon', '●')}  {key}")
-
-#         # Score
-#         c.setFont(FONT_BOLD, 34)
-#         c.setFillColor(score_color(val))
-#         c.drawString(lx + 14, ly + card_h - 66, str(val))
-#         c.setFont(FONT, 11)
-#         c.setFillColor(TEXT_MUTED)
-#         c.drawString(lx + 14 + c.stringWidth(str(val), FONT_BOLD, 34) + 4,
-#                      ly + card_h - 60, "/ 100")
-
-#         # Status tag
-#         draw_tag(c, lx + 14, ly + card_h - 88, score_status(val),
-#                  score_color(val), height=16, radius=6)
-
-#         # Progress bar
-#         draw_progress_bar(c, lx + 14, ly + card_h - 106, card_w - 28, 8, val)
-
-#         # Description
-#         c.setFont(FONT, 8.5)
-#         c.setFillColor(TEXT_SECONDARY)
-#         wrap_text_in_box(c, meta.get("desc", ""), lx + 14, ly + card_h - 112,
-#                          card_w - 28, 8.5, line_height=12, max_lines=2)
-
-#         # Tip
-#         c.setFillColor(score_color_light(val))
-#         c.roundRect(lx + 10, ly + 10, card_w - 20, 34, 6, fill=1, stroke=0)
-#         c.setFont(FONT, 8)
-#         c.setFillColor(score_color(val))
-#         tip = meta.get("tip", "")
-#         wrap_text_in_box(
-#     c,
-#     f"Tip: {tip}",
-#     lx + 18,
-#     ly + 24,
-#     card_w - 36,
-#     8,
-#     line_height=10,
-#     max_lines=2
-# )
-
-#     # ── COMPARISON CHART ──
-#     chart_y = content_top - card_h * 2 - 54
-#     chart_h = 140
-#     draw_card(c, MARGIN, chart_y - chart_h, PAGE_WIDTH - MARGIN * 2, chart_h, radius=14)
-#     draw_text(c, "Lifestyle Factor Comparison", MARGIN + 16, chart_y - 22, 13, FONT_BOLD)
-#     draw_divider(c, MARGIN + 16, chart_y - 32, PAGE_WIDTH - MARGIN * 2 - 32)
-
-#     bar_area_w = PAGE_WIDTH - MARGIN * 2 - 32
-#     bar_h = 16
-#     keys = list(lifestyle.keys())
-#     for bi, key in enumerate(keys):
-#         val = lifestyle[key]
-#         by = chart_y - 52 - bi * 24
-#         c.setFont(FONT, 10)
-#         c.setFillColor(TEXT_SECONDARY)
-#         c.drawString(MARGIN + 16, by + 2, key)
-#         draw_progress_bar(c, MARGIN + 100, by, bar_area_w - 145, bar_h, val)
-#         c.setFont(FONT_BOLD, 10)
-#         c.setFillColor(score_color(val))
-#         c.drawString(MARGIN + bar_area_w - 40, by + 2, f"{val}/100")
 def draw_lifestyle_page(c, data):
     draw_page_header(c, "Lifestyle Impact Analysis",
                      "How your daily habits are affecting cognitive performance", 4)
@@ -1375,7 +1187,11 @@ def draw_lifestyle_page(c, data):
     }
 
     card_w = (PAGE_WIDTH - MARGIN * 2 - 12) / 2
-    card_h = 138
+    # 138 left only 16pt between the progress bar and the Tip band, so the
+    # description's second line was drawn on top of the coloured Tip band.
+    # Page 4 had ~180pt of unused space below the root-cause card, so the
+    # cards take the height they actually need.
+    card_h = 168
     positions = [
         (MARGIN,               content_top - card_h),
         (MARGIN + card_w + 12, content_top - card_h),
@@ -1400,32 +1216,37 @@ def draw_lifestyle_page(c, data):
         # Score
         c.setFont(FONT_BOLD, 30)
         c.setFillColor(score_color(val))
-        c.drawString(lx + 14, ly + card_h - 58, str(val))
+        c.drawString(lx + 14, ly + card_h - 60, str(val))
         c.setFont(FONT, 10)
         c.setFillColor(TEXT_MUTED)
         c.drawString(lx + 14 + c.stringWidth(str(val), FONT_BOLD, 30) + 4,
-                     ly + card_h - 52, "/ 100")
+                     ly + card_h - 54, "/ 100")
 
         # Status tag
-        draw_tag(c, lx + 14, ly + card_h - 76,
+        draw_tag(c, lx + 14, ly + card_h - 82,
                  score_status(val), score_color(val), height=14, radius=5)
 
         # Progress bar
-        draw_progress_bar(c, lx + 14, ly + card_h - 90, card_w - 28, 7, val)
+        draw_progress_bar(c, lx + 14, ly + card_h - 100, card_w - 28, 7, val)
 
-        # Description
-        wrap_text_in_box(c, meta.get("desc", ""), lx + 14, ly + card_h - 100,
-                         card_w - 28, 8, line_height=11, max_lines=2,
-                         font=FONT, color=TEXT_SECONDARY)
-
-        # Tip
+        # Tip band, anchored to the bottom of the card
+        tip_band_y = ly + 8
+        tip_band_h = 26
         c.setFillColor(score_color_light(val))
-        c.roundRect(lx + 10, ly + 8, card_w - 20, 24, 5, fill=1, stroke=0)
+        c.roundRect(lx + 10, tip_band_y, card_w - 20, tip_band_h, 5, fill=1, stroke=0)
         c.setFont(FONT, 7.5)
         c.setFillColor(score_color(val))
         wrap_text_in_box(c, f"Tip: {meta.get('tip', '')}",
-                         lx + 18, ly + 22, card_w - 36,
+                         lx + 18, tip_band_y + 14, card_w - 36,
                          7.5, line_height=10, max_lines=2)
+
+        # Description — sits between the progress bar and the Tip band, with
+        # the line budget taken from the gap that actually exists.
+        desc_top   = ly + card_h - 114
+        desc_lines = max(1, int((desc_top - (tip_band_y + tip_band_h + 6)) / 11) + 1)
+        wrap_text_in_box(c, meta.get("desc", ""), lx + 14, desc_top,
+                         card_w - 28, 8, line_height=11, max_lines=desc_lines,
+                         font=FONT, color=TEXT_SECONDARY)
 
     # ── ROOT CAUSE ANALYSIS ──
     root_causes = data.get("root_causes", [])
@@ -1461,28 +1282,31 @@ def draw_lifestyle_page(c, data):
         c.setFont(FONT_BOLD, 9)
         c.drawCentredString(MARGIN + 43, ry + 16, f"{cause['impact_pct']}%")
 
-        # Factor name
-        c.setFont(FONT_BOLD, 10)
-        c.setFillColor(TEXT_PRIMARY)
-        c.drawString(MARGIN + 72, ry + 28, cause["factor"])
+        # Impact bar geometry (declared first so the text can be bounded by it)
+        bar_x     = PAGE_WIDTH - MARGIN - 140
+        bar_w     = 120
+        text_x    = MARGIN + 72
+        # The old width (PAGE_WIDTH - 2*MARGIN - 200 = 315pt) ran 12pt past
+        # the bar's left edge, so a full-width line could slide under it.
+        text_w    = bar_x - text_x - 12
 
-        # Description — full width, no truncation
+        # Factor name
+        draw_text_fitted(c, cause["factor"], text_x, ry + 28, FONT_BOLD, 10,
+                         text_w, color=TEXT_PRIMARY, min_size=8)
+
+        # Description — bounded by the bar, no truncation
         c.setFont(FONT, 8)
         c.setFillColor(TEXT_SECONDARY)
         wrap_text_in_box(
             c,
             cause["description"],
-            MARGIN + 72,
+            text_x,
             ry + 17,
-            PAGE_WIDTH - MARGIN * 2 - 200,  # leave space for bar on right
+            text_w,
             8,
             line_height=10,
             max_lines=2,
         )
-
-        # Impact bar — right side, does NOT overlap text
-        bar_x     = PAGE_WIDTH - MARGIN - 140
-        bar_w     = 120
         bar_val   = cause["impact_pct"] * 2  # scale 0–50 → 0–100 visually
         bar_col   = [DANGER, WARNING, WARNING, PRIMARY][ri] if ri < 4 else TEXT_MUTED
 
@@ -1503,374 +1327,7 @@ def draw_lifestyle_page(c, data):
 # ============================================================
 # PAGE 5 — AI COGNITIVE INSIGHTS
 # ============================================================
-# def draw_ai_insights_page(c, data):
 
-#     draw_page_header(
-#         c,
-#         "AI Cognitive Insights",
-#         "Personalized analysis powered by Limitless AI",
-#         5
-#     )
-
-#     draw_page_footer(c, data["report_id"])
-
-#     ai = data["ai_insights"]
-
-#     content_top = PAGE_HEIGHT - 88
-
-#     # ============================================================
-#     # MAIN ANALYSIS CARD
-#     # ============================================================
-
-#     main_h = 118
-
-#     draw_card(
-#         c,
-#         MARGIN,
-#         content_top - main_h,
-#         PAGE_WIDTH - MARGIN * 2,
-#         main_h,
-#         radius=16
-#     )
-
-#     # AI Badge
-#     c.setFillColor(Color(37/255, 99/255, 235/255, alpha=0.08))
-
-#     c.roundRect(
-#         MARGIN + 16,
-#         content_top - 24,
-#         54,
-#         16,
-#         7,
-#         fill=1,
-#         stroke=0
-#     )
-
-#     c.setFillColor(PRIMARY)
-#     c.setFont(FONT_BOLD, 7.5)
-
-#     c.drawCentredString(
-#         MARGIN + 43,
-#         content_top - 18,
-#         "AI ANALYSIS"
-#     )
-
-#     # Title
-#     draw_text(
-#         c,
-#         "Cognitive Performance Summary",
-#         MARGIN + 16,
-#         content_top - 46,
-#         14,
-#         FONT_BOLD
-#     )
-
-#     # Summary text
-#     wrap_text_in_box(
-#         c,
-#         ai["analysis"],
-#         MARGIN + 16,
-#         content_top - 60,
-#         PAGE_WIDTH - MARGIN * 2 - 32,
-#         10,
-#         line_height=15,
-#         max_lines=4,
-#         font=FONT,
-#         color=TEXT_SECONDARY
-#     )
-
-#     # ============================================================
-#     # INSIGHTS + CAUSES SECTION
-#     # ============================================================
-
-#     section_y = content_top - 138
-
-#     half_w = (PAGE_WIDTH - MARGIN * 2 - 12) / 2
-
-#     card_h = 132
-
-#     # ============================================================
-#     # BEHAVIORAL INSIGHTS
-#     # ============================================================
-
-#     draw_card(
-#         c,
-#         MARGIN,
-#         section_y - card_h,
-#         half_w,
-#         card_h,
-#         radius=14
-#     )
-
-#     draw_text(
-#         c,
-#         "Behavioral Insights",
-#         MARGIN + 16,
-#         section_y - 18,
-#         12,
-#         FONT_BOLD,
-#         PRIMARY
-#     )
-
-#     draw_divider(
-#         c,
-#         MARGIN + 16,
-#         section_y - 28,
-#         half_w - 32
-#     )
-
-#     for bii, insight in enumerate(ai["behavioral_insights"][:4]):
-
-#         iy = section_y - 52 - bii * 24
-
-#         # Bullet
-#         bullet_y = iy + 6
-
-#         c.setFillColor(PRIMARY)
-
-#         c.roundRect(
-#             MARGIN + 16,
-#             bullet_y,
-#             5,
-#             10,
-#             2,
-#             fill=1,
-#             stroke=0
-#         )
-
-#         # Text
-#         wrap_text_in_box(
-#             c,
-#             insight,
-#             MARGIN + 30,
-#             iy + 12,
-#             half_w - 46,
-#             8.5,
-#             line_height=10,
-#             max_lines=2,
-#             font=FONT,
-#             color=TEXT_SECONDARY
-#         )
-
-#     # ============================================================
-#     # POTENTIAL CAUSES
-#     # ============================================================
-
-#     cx = MARGIN + half_w + 12
-
-#     draw_card(
-#         c,
-#         cx,
-#         section_y - card_h,
-#         half_w,
-#         card_h,
-#         radius=14
-#     )
-
-#     draw_text(
-#         c,
-#         "Potential Causes",
-#         cx + 16,
-#         section_y - 18,
-#         12,
-#         FONT_BOLD,
-#         WARNING
-#     )
-
-#     draw_divider(
-#         c,
-#         cx + 16,
-#         section_y - 28,
-#         half_w - 32
-#     )
-
-#     for cai, cause in enumerate(ai["potential_causes"][:4]):
-
-#         cy = section_y - 52 - cai * 24
-
-#         # Bullet
-#         bullet_y = cy + 6
-
-#         c.setFillColor(WARNING)
-
-#         c.roundRect(
-#             cx + 16,
-#             bullet_y,
-#             5,
-#             10,
-#             2,
-#             fill=1,
-#             stroke=0
-#         )
-
-#         # Text
-#         wrap_text_in_box(
-#             c,
-#             cause,
-#             cx + 30,
-#             cy + 12,
-#             half_w - 46,
-#             8.5,
-#             line_height=10,
-#             max_lines=2,
-#             font=FONT,
-#             color=TEXT_SECONDARY
-#         )
-
-#     # ============================================================
-#     # PROJECTION SECTION
-#     # ============================================================
-
-#     proj = ai["improvement_projection"]
-
-#     proj_y = section_y - 182
-
-#     draw_text(
-#         c,
-#         "Projected Improvement (30 Days)",
-#         MARGIN,
-#         proj_y + 12,
-#         12,
-#         FONT_BOLD
-#     )
-
-#     proj_card_h = 130
-
-#     gap = 10
-
-#     proj_w = (
-#         PAGE_WIDTH - MARGIN * 2 - gap * 2
-#     ) / 3
-
-#     for pi, (domain, vals) in enumerate(proj.items()):
-
-#         px = MARGIN + pi * (proj_w + gap)
-
-#         draw_card(
-#             c,
-#             px,
-#             proj_y - proj_card_h,
-#             proj_w,
-#             proj_card_h,
-#             radius=14
-#         )
-
-#         # ============================================================
-#         # DOMAIN TITLE
-#         # ============================================================
-
-#         c.setFont(FONT_BOLD, 11)
-#         c.setFillColor(TEXT_PRIMARY)
-
-#         c.drawCentredString(
-#             px + proj_w / 2,
-#             proj_y - 20,
-#             domain
-#         )
-
-#         cur = vals["current"]
-#         prj = vals["projected"]
-#         gain = prj - cur
-
-#         # ============================================================
-#         # SCORES
-#         # ============================================================
-
-#         score_y = proj_y - 48
-
-#         c.setFont(FONT_BOLD, 18)
-#         c.setFillColor(DANGER)
-
-#         c.drawCentredString(
-#             px + proj_w / 2 - 28,
-#             score_y,
-#             str(cur)
-#         )
-
-#         c.setFont(FONT_BOLD, 16)
-#         c.setFillColor(TEXT_MUTED)
-
-#         c.drawCentredString(
-#             px + proj_w / 2,
-#             score_y + 1,
-#             "→"
-#         )
-
-#         c.setFont(FONT_BOLD, 18)
-#         c.setFillColor(SUCCESS)
-
-#         c.drawCentredString(
-#             px + proj_w / 2 + 28,
-#             score_y,
-#             str(prj)
-#         )
-
-#         # ============================================================
-#         # GAIN BADGE
-#         # ============================================================
-
-#         c.setFillColor(SUCCESS_LIGHT)
-
-#         c.roundRect(
-#             px + proj_w / 2 - 22,
-#             proj_y - 74,
-#             44,
-#             16,
-#             7,
-#             fill=1,
-#             stroke=0
-#         )
-
-#         c.setFillColor(SUCCESS)
-#         c.setFont(FONT_BOLD, 8)
-
-#         c.drawCentredString(
-#             px + proj_w / 2,
-#             proj_y - 68,
-#             f"+{gain} pts"
-#         )
-
-#         # ============================================================
-#         # BARS
-#         # ============================================================
-
-#         draw_text(
-#             c,
-#             "Current",
-#             px + 10,
-#             proj_y - 88,
-#             7,
-#             FONT,
-#             TEXT_MUTED
-#         )
-
-#         draw_progress_bar(
-#             c,
-#             px + 10,
-#             proj_y - 96,
-#             proj_w - 20,
-#             5,
-#             cur
-#         )
-
-#         draw_text(
-#             c,
-#             "Projected",
-#             px + 10,
-#             proj_y - 108,
-#             7,
-#             FONT,
-#             TEXT_MUTED
-#         )
-
-#         draw_progress_bar(
-#             c,
-#             px + 10,
-#             proj_y - 116,
-#             proj_w - 20,
-#             5,
-#             prj
-#         )
 def draw_ai_insights_page(c, data):
     draw_page_header(
         c,
@@ -1973,20 +1430,37 @@ def draw_ai_insights_page(c, data):
 
         draw_card(c, px, proj_y - proj_card_h, proj_w, proj_card_h, radius=12)
 
-        c.setFont(FONT_BOLD, 10)
-        c.setFillColor(TEXT_PRIMARY)
-        c.drawCentredString(px + proj_w / 2, proj_y - 18, domain)
+        # Domain name — fitted so long scale names stay inside the card
+        draw_text_fitted(c, domain, px + proj_w / 2, proj_y - 18, FONT_BOLD, 10,
+                         proj_w - 16, color=TEXT_PRIMARY, align="center", min_size=7)
 
-        # Current → Projected scores
-        c.setFont(FONT_BOLD, 16)
+        # Current -> Projected scores.
+        # Laid out from measured widths instead of fixed +/-24 offsets, which
+        # collided once a value needed 5 characters (e.g. "68.75").
+        cur_s, prj_s = str(cur), str(prj)
+        val_size = 16.0
+        gap      = 7
+        arrow_w  = c.stringWidth("→", FONT_BOLD, 14)
+        while val_size > 9 and (
+            c.stringWidth(cur_s, FONT_BOLD, val_size)
+            + c.stringWidth(prj_s, FONT_BOLD, val_size)
+            + arrow_w + gap * 2
+        ) > proj_w - 20:
+            val_size -= 0.5
+        cur_w = c.stringWidth(cur_s, FONT_BOLD, val_size)
+        prj_w = c.stringWidth(prj_s, FONT_BOLD, val_size)
+        total = cur_w + gap + arrow_w + gap + prj_w
+        left  = px + proj_w / 2 - total / 2
+
+        c.setFont(FONT_BOLD, val_size)
         c.setFillColor(DANGER)
-        c.drawCentredString(px + proj_w / 2 - 24, proj_y - 42, str(cur))
+        c.drawString(left, proj_y - 42, cur_s)
         c.setFont(FONT_BOLD, 14)
         c.setFillColor(TEXT_MUTED)
-        c.drawCentredString(px + proj_w / 2, proj_y - 41, "→")
-        c.setFont(FONT_BOLD, 16)
+        c.drawString(left + cur_w + gap, proj_y - 41, "→")
+        c.setFont(FONT_BOLD, val_size)
         c.setFillColor(SUCCESS)
-        c.drawCentredString(px + proj_w / 2 + 24, proj_y - 42, str(prj))
+        c.drawString(left + cur_w + gap + arrow_w + gap, proj_y - 42, prj_s)
 
         # Gain badge
         c.setFillColor(SUCCESS_LIGHT)
@@ -2005,8 +1479,26 @@ def draw_ai_insights_page(c, data):
     # RISK PREDICTION — TWO CARDS SIDE BY SIDE
     # ============================================================
     rp_y    = proj_y - proj_card_h -28
-    rp_h    = 175
     rp_half = (PAGE_WIDTH - MARGIN * 2 - 12) / 2
+
+    # Card height is derived from its tallest content. At the old fixed 175pt
+    # the closing statement band was drawn ~33pt BELOW the card, outside its
+    # own boundary, whenever three domain rows were present.
+    declines_n = len(no_action.get("domain_declines", [])[:3])
+    gains_n    = len(with_action.get("domain_gains", [])[:3])
+    rp_rows    = max(declines_n, gains_n)
+    rp_row_h   = 24
+    rp_h       = 122 + rp_rows * rp_row_h + 36
+
+    # ---- Row columns (shared by both cards) --------------------------
+    # Domain label gets its own measured column and the numbers are
+    # right-aligned just left of the mini bar, so long names such as
+    # "Stress & Emotional Load" (94.7pt @8) no longer run into the value
+    # that used to sit at a fixed +80pt.
+    rp_bar_w     = 54
+    rp_bar_off   = rp_half - 70                  # mini bar x offset within card
+    rp_val_right = rp_bar_off - 8                # numbers right-aligned here
+    rp_label_w   = rp_val_right - 12 - 46 - 8    # remainder for the label
 
     draw_text(c, "Future Outlook", MARGIN, rp_y + 10, 11, FONT_BOLD)
 
@@ -2066,24 +1558,22 @@ def draw_ai_insights_page(c, data):
         pct_v  = dec["decline_pct"]
         pts_v  = cur_v - proj_v
 
-        # Domain label
-        c.setFont(FONT_BOLD, 8)
-        c.setFillColor(TEXT_PRIMARY)
-        c.drawString(MARGIN + 12, dy + 8, dec["domain"])
+        # Domain label — measured column, shrinks only if genuinely too long
+        draw_text_fitted(c, dec["domain"], MARGIN + 12, dy + 8, FONT_BOLD, 8,
+                         rp_label_w, color=TEXT_PRIMARY, min_size=6.5)
 
-        # Points drop — bold red
-        c.setFont(FONT_BOLD, 9)
-        c.setFillColor(DANGER)
-        c.drawString(MARGIN + 80, dy + 8, f"{cur_v} → {proj_v}")
+        # Points drop — bold red, right-aligned clear of the label
+        draw_text_fitted(c, f"{cur_v} → {proj_v}", MARGIN + rp_val_right, dy + 8,
+                         FONT_BOLD, 9, 46, color=DANGER, align="right", min_size=7)
 
         # Percentage in smaller text below
-        c.setFont(FONT, 7.5)
-        c.setFillColor(TEXT_MUTED)
-        c.drawString(MARGIN + 80, dy - 1, f"−{pts_v} pts  /  −{pct_v}%")
+        draw_text_fitted(c, f"−{pts_v} pts  /  −{pct_v}%", MARGIN + rp_val_right,
+                         dy - 1, FONT, 7.5, 62, color=TEXT_MUTED,
+                         align="right", min_size=6)
 
         # Mini decline bar
-        bar_x3  = MARGIN + rp_half - 70
-        bar_w3  = 54
+        bar_x3  = MARGIN + rp_bar_off
+        bar_w3  = rp_bar_w
         c.setFillColor(DANGER_LIGHT)
         c.roundRect(bar_x3, dy + 2, bar_w3, 8, 4, fill=1, stroke=0)
         decline_fill = max(4, int((pct_v / 20) * bar_w3))
@@ -2091,7 +1581,8 @@ def draw_ai_insights_page(c, data):
         c.roundRect(bar_x3, dy + 2, decline_fill, 8, 4, fill=1, stroke=0)
 
     # Burnout statement
-    bs_y = dl_y - 18 - len(declines) * 24 - 6
+    # Anchored to the capped row count so the band stays inside the card.
+    bs_y = dl_y - 18 - rp_rows * rp_row_h - 8
     c.setFillColor(WARNING_LIGHT)
     c.roundRect(MARGIN + 12, bs_y - 14, rp_half - 24, 18, 5, fill=1, stroke=0)
     c.setFont(FONT, 7.5)
@@ -2164,24 +1655,22 @@ def draw_ai_insights_page(c, data):
         gain_pt = gain_item["gain_pts"]
         gain_pc = gain_item["gain_pct"]
 
-        # Domain label
-        c.setFont(FONT_BOLD, 8)
-        c.setFillColor(TEXT_PRIMARY)
-        c.drawString(rx2 + 12, gy + 8, gain_item["domain"])
+        # Domain label — measured column, shrinks only if genuinely too long
+        draw_text_fitted(c, gain_item["domain"], rx2 + 12, gy + 8, FONT_BOLD, 8,
+                         rp_label_w, color=TEXT_PRIMARY, min_size=6.5)
 
-        # Points gain — bold green
-        c.setFont(FONT_BOLD, 9)
-        c.setFillColor(SUCCESS)
-        c.drawString(rx2 + 80, gy + 8, f"{cur_v} → {p90}")
+        # Points gain — bold green, right-aligned clear of the label
+        draw_text_fitted(c, f"{cur_v} → {p90}", rx2 + rp_val_right, gy + 8,
+                         FONT_BOLD, 9, 46, color=SUCCESS, align="right", min_size=7)
 
         # Percentage in smaller text below
-        c.setFont(FONT, 7.5)
-        c.setFillColor(TEXT_MUTED)
-        c.drawString(rx2 + 80, gy - 1, f"+{gain_pt} pts  /  +{gain_pc}%")
+        draw_text_fitted(c, f"+{gain_pt} pts  /  +{gain_pc}%", rx2 + rp_val_right,
+                         gy - 1, FONT, 7.5, 62, color=TEXT_MUTED,
+                         align="right", min_size=6)
 
         # Mini gain bar
-        bar_x4  = rx2 + rp_half - 70
-        bar_w4  = 54
+        bar_x4  = rx2 + rp_bar_off
+        bar_w4  = rp_bar_w
         c.setFillColor(SUCCESS_LIGHT)
         c.roundRect(bar_x4, gy + 2, bar_w4, 8, 4, fill=1, stroke=0)
         gain_fill = max(4, int((min(gain_pc, 50) / 50) * bar_w4))
@@ -2189,7 +1678,8 @@ def draw_ai_insights_page(c, data):
         c.roundRect(bar_x4, gy + 2, gain_fill, 8, 4, fill=1, stroke=0)
 
     # Motivational footer inside card
-    mf_y = ga_y - 18 - len(gains) * 24 - 6
+    # Anchored to the capped row count so the band stays inside the card.
+    mf_y = ga_y - 18 - rp_rows * rp_row_h - 8
     c.setFillColor(SUCCESS_LIGHT)
     c.roundRect(rx2 + 12, mf_y - 14, rp_half - 24, 18, 5, fill=1, stroke=0)
     c.setFont(FONT_BOLD, 7.5)
@@ -2209,8 +1699,22 @@ def draw_wellness_page(c, data):
 
     indicators = data["wellness_indicators"]
     content_top = PAGE_HEIGHT - 88
-    card_h = 112
     gap = 14
+
+    # The loop was previously uncapped at a fixed 112pt card. With 6+ risk
+    # indicators (the rule set can produce 7) the last cards and the notice
+    # below them were drawn at negative y — off the page entirely.
+    # Cards are now sized to the space available, and capped if even the
+    # minimum height will not fit.
+    DISCLAIMER_H = 56
+    BOTTOM_LIMIT = 44
+    avail = (content_top - 14) - BOTTOM_LIMIT - DISCLAIMER_H - 20
+    n = max(1, len(indicators))
+    card_h = clamp(avail / n - gap, 78, 112)
+    max_cards = max(1, int(avail // (78 + gap)))
+    if len(indicators) > max_cards:
+        indicators = indicators[:max_cards]
+        card_h = 78
 
     for ii, ind in enumerate(indicators):
         iy = content_top - 14 - ii * (card_h + gap)
@@ -2227,18 +1731,20 @@ def draw_wellness_page(c, data):
         c.setFont(FONT_BOLD, 16)
         c.drawCentredString(MARGIN + 34, iy - card_h / 2 - 5, "⚠")
 
-        # Title
-        c.setFont(FONT_BOLD, 14)
-        c.setFillColor(TEXT_PRIMARY)
-        c.drawString(MARGIN + 64, iy - 22, ind["title"])
+        # Title — fitted so a long indicator name cannot leave the card
+        draw_text_fitted(c, ind["title"], MARGIN + 64, iy - 22, FONT_BOLD, 14,
+                         PAGE_WIDTH - MARGIN * 2 - 80, color=TEXT_PRIMARY, min_size=10)
 
-        # Description
+        # Description — line budget derived from the space above the tag
+        desc_top   = iy - 40
+        tag_top    = iy - card_h + 14 + 18
+        desc_lines = max(1, int((desc_top - tag_top - 4) / 16) + 1)
         c.setFont(FONT, 11)
         c.setFillColor(TEXT_SECONDARY)
         wrap_text_in_box(c, ind["description"],
-                         MARGIN + 64, iy - 40,
+                         MARGIN + 64, desc_top,
                          PAGE_WIDTH - MARGIN * 2 - 80, 11,
-                         line_height=16, max_lines=3)
+                         line_height=16, max_lines=desc_lines)
 
         # Tag
         draw_tag(c, MARGIN + 64, iy - card_h + 14,
@@ -2267,109 +1773,6 @@ def draw_wellness_page(c, data):
     max_lines=2
 )
 
-
-# ============================================================
-# PAGE 7 — COGNITIVE STRENGTHS
-# ============================================================
-
-# def draw_strengths_page(c, data):
-#     draw_page_header(c, "Cognitive Strengths",
-#                      "Your standout capabilities and performance advantages", 7)
-#     draw_page_footer(c, data["report_id"])
-
-#     strengths = data["strengths"]
-#     content_top = PAGE_HEIGHT - 88
-#     card_h = 105
-#     gap = 14
-
-#     # Intro card
-#     draw_card(c, MARGIN, content_top - 60, PAGE_WIDTH - MARGIN * 2, 52, radius=14,
-#               bg=HexColor("#F0FDF4"))
-#     c.setFillColor(SUCCESS)
-#     c.setFont(FONT_BOLD, 11)
-#     c.drawString(MARGIN + 16, content_top - 28,
-#                  "★  Your cognitive profile shows meaningful strengths worth celebrating and building upon.")
-#     c.setFont(FONT, 10)
-#     c.setFillColor(TEXT_SECONDARY)
-#     c.drawString(MARGIN + 16, content_top - 44,
-#                  "These areas demonstrate resilience and can serve as anchors for overall improvement.")
-
-#     strength_descs = {
-#         "Reaction Time":       "Fast processing and quick response speed remain a significant strength.",
-#         "Language Processing": "Strong comprehension and verbal reasoning abilities detected.",
-#         "Problem Solving":     "Logical thinking and analytical problem solving remain above average.",
-#     }
-
-#     for si, strength in enumerate(strengths):
-#         sy = content_top - 82 - si * (card_h + gap)
-#         draw_card(c, MARGIN, sy - card_h, PAGE_WIDTH - MARGIN * 2, card_h, radius=14)
-
-#         # Rank badge
-#         rank_colors = [SUCCESS, PRIMARY, PRIMARY_LIGHT]
-#         rc = rank_colors[si] if si < len(rank_colors) else TEXT_MUTED
-#         c.setFillColor(rc)
-#         c.circle(MARGIN + 28, sy - card_h / 2, 18, fill=1, stroke=0)
-#         c.setFillColor(white)
-#         c.setFont(FONT_BOLD, 14)
-#         c.drawCentredString(MARGIN + 28, sy - card_h / 2 - 5, str(si + 1))
-
-#         # Title
-#         c.setFont(FONT_BOLD, 16)
-#         c.setFillColor(TEXT_PRIMARY)
-#         c.drawString(MARGIN + 56, sy - 20, strength["title"])
-
-#         # Score
-#         c.setFont(FONT_BOLD, 20)
-#         c.setFillColor(SUCCESS)
-#         c.drawRightString(PAGE_WIDTH - MARGIN - 14, sy - 20, f"{strength['score']}/100")
-
-#         # Description
-#         desc = strength_descs.get(strength["title"], strength.get("description", ""))
-#         c.setFont(FONT, 10.5)
-#         c.setFillColor(TEXT_SECONDARY)
-#         c.drawString(MARGIN + 56, sy - 40, desc)
-
-#         # Progress bar
-#         draw_progress_bar(c, MARGIN + 56, sy - card_h + 30,
-#                           PAGE_WIDTH - MARGIN * 2 - 70, 10, strength["score"])
-
-#         # Score pips on bar
-#         for pip_val in [25, 50, 75, 100]:
-#             pip_x = MARGIN + 56 + (pip_val / 100) * (PAGE_WIDTH - MARGIN * 2 - 70)
-#             c.setFillColor(BACKGROUND)
-#             c.circle(pip_x, sy - card_h + 25, 2, fill=1, stroke=0)
-
-#         # Status tag
-#         draw_tag(c, MARGIN + 56, sy - card_h + 6,
-#                  score_status(strength["score"]), SUCCESS, height=14, radius=5)
-
-#     # Radar mini for strengths
-#     all_domains = data["domains"]
-#     chart_y = content_top - 82 - len(strengths) * (card_h + gap) - 20
-#     chart_h = 160
-#     if chart_y - chart_h > 44:
-#         draw_card(c, MARGIN, chart_y - chart_h,
-#                   PAGE_WIDTH - MARGIN * 2, chart_h, radius=14)
-#         draw_text(c, "Strength Distribution",
-#                   MARGIN + 14, chart_y - 20, 12, FONT_BOLD)
-#         # Mini bar chart for all domains sorted by score
-#         sorted_domains = sorted(all_domains.items(), key=lambda x: x[1], reverse=True)
-#         bar_w_total = PAGE_WIDTH - MARGIN * 2 - 28
-#         bar_item_w = bar_w_total / len(sorted_domains)
-#         for di, (dname, dval) in enumerate(sorted_domains):
-#             bx = MARGIN + 14 + di * bar_item_w
-#             max_bar_h = chart_h - 50
-#             bh = (dval / 100) * max_bar_h
-#             c.setFillColor(score_color(dval))
-#             c.roundRect(bx + 4, chart_y - chart_h + 28, bar_item_w - 8, bh, 4, fill=1, stroke=0)
-#             c.setFont(FONT, 7)
-#             c.setFillColor(TEXT_SECONDARY)
-#             c.drawCentredString(bx + bar_item_w / 2, chart_y - chart_h + 18,
-#                                 dname[:5])
-#             c.setFont(FONT_BOLD, 8)
-#             c.setFillColor(TEXT_PRIMARY)
-#             c.drawCentredString(bx + bar_item_w / 2,
-#                                 chart_y - chart_h + 28 + bh + 4, str(dval))
 def draw_strengths_page(c, data):
     draw_page_header(c, "Cognitive Strengths",
                      "Your standout capabilities and performance advantages", 7)
@@ -2448,15 +1851,17 @@ def draw_strengths_page(c, data):
         draw_tag(c, MARGIN + 56, sy - card_h + 6,
                  score_status(strength["score"]), rc, height=13, radius=5)
 
-    # Strength distribution bar chart
-    all_domains = data["domains"]
+    # Strength distribution bar chart — active vocabulary (7 v2 scales / 8 legacy)
+    _is_v2      = data.get("model_version") == "v2"
+    all_domains = data.get("radar_domains") or data["domains"]
     chart_y     = content_top - 74 - len(strengths) * (card_h + gap) - 16
     chart_h     = 148
 
     if chart_y - chart_h > 44:
         draw_card(c, MARGIN, chart_y - chart_h,
                   PAGE_WIDTH - MARGIN * 2, chart_h, radius=14)
-        draw_text(c, "Strength Distribution — All Domains",
+        draw_text(c, "Strength Distribution — All Scales"
+                  if data.get("model_version") == "v2" else "Strength Distribution — All Domains",
                   MARGIN + 14, chart_y - 18, 11, FONT_BOLD)
         draw_divider(c, MARGIN + 14, chart_y - 28,
                      PAGE_WIDTH - MARGIN * 2 - 28)
@@ -2464,7 +1869,7 @@ def draw_strengths_page(c, data):
         sorted_domains = sorted(all_domains.items(),
                                 key=lambda x: x[1], reverse=True)
         bar_item_w  = (PAGE_WIDTH - MARGIN * 2 - 28) / len(sorted_domains)
-        max_bar_h   = chart_h - 52
+        max_bar_h   = chart_h - 68
 
         for di, (dname, dval) in enumerate(sorted_domains):
             bx   = MARGIN + 14 + di * bar_item_w
@@ -2480,11 +1885,13 @@ def draw_strengths_page(c, data):
             c.setFillColor(score_color(dval))
             c.drawCentredString(bx + bar_item_w / 2, by3 + bh + 2, str(dval))
 
-            # Domain label below
+            # Domain label below. v2 scale names are truncated (bars are only
+            # ~70pt wide); v1 labels are left exactly as they were.
+            label = SHORT_LABELS.get(dname, dname) if _is_v2 else dname
             c.setFont(FONT, 6)
             c.setFillColor(TEXT_SECONDARY)
             c.drawCentredString(bx + bar_item_w / 2,
-                                chart_y - chart_h + 16, dname)
+                                chart_y - chart_h + 16, label)
 
             # Badge for top 3
             badge_info = STRENGTH_BADGES.get(dname, {})
@@ -2670,6 +2077,20 @@ def draw_cognitive_age_page(c, data):
         c.setFillColor(TEXT_SECONDARY)
         c.drawString(ux + 36, iy + 1, item)
 
+    # Item 3 (v2 only, additive): range + provisional footnote, placed in the
+    # existing whitespace gap between the checklist cards and the "Why it
+    # matters" card below — no existing element on this page is moved.
+    age_range = data.get("cognitive_age_range")
+    if age_range:
+        range_y = cl_y - 178
+        c.setFont(FONT_BOLD, 11)
+        c.setFillColor(TEXT_PRIMARY)
+        c.drawCentredString(PAGE_WIDTH / 2, range_y,
+                            f"Range: {age_range['low']}–{age_range['high']}")
+        c.setFont(FONT_OBL, 8)
+        c.setFillColor(TEXT_MUTED)
+        c.drawCentredString(PAGE_WIDTH / 2, range_y - 16, age_range["disclaimer"])
+
     # Why it matters card
     wim_y = cl_y - 360
     draw_card(c, MARGIN, wim_y, PAGE_WIDTH - MARGIN * 2, 100, radius=14,
@@ -2686,12 +2107,118 @@ def draw_cognitive_age_page(c, data):
 
 
 # ============================================================
+# PROGRESS & RELIABLE CHANGE (v2 only — new page, gated by
+# ENABLE_RELIABLE_CHANGE and only inserted when reliable-change data is
+# actually available; see Phase 4 item 4 / Phase 5). Appended after the
+# Cognitive Age page and before Legal — never reorders any existing page,
+# and is entirely absent (page count identical to today) unless both the
+# flag is on and there is real two-session reliable-change data to show.
+# ============================================================
+
+def draw_progress_page(c, data, page_num=10):
+    draw_page_header(c, "Progress & Reliable Change",
+                     "Comparing this assessment against your prior session", page_num)
+    draw_page_footer(c, data["report_id"])
+
+    pt = data.get("progress_table") or {"domain_rows": [], "composite_rows": []}
+    content_top = PAGE_HEIGHT - 88
+
+    # ---- Composite reliable-change summary cards ----
+    comp_rows = pt["composite_rows"]
+    card_h = 90
+    card_gap = 10
+    n = max(len(comp_rows), 1)
+    card_w = (PAGE_WIDTH - MARGIN * 2 - card_gap * (n - 1)) / n
+
+    draw_text(c, "Reliable Change Summary", MARGIN, content_top - 6, 14, FONT_BOLD)
+    row_y = content_top - 20
+
+    for i, row in enumerate(comp_rows):
+        cx = MARGIN + i * (card_w + card_gap)
+        flag = row["flag"]
+        if flag == "Reliable improvement":
+            col = SUCCESS
+        elif flag == "Reliable decline":
+            col = DANGER
+        else:
+            col = TEXT_MUTED
+
+        draw_card(c, cx, row_y - card_h, card_w, card_h, radius=12)
+        c.setFillColor(col)
+        c.roundRect(cx, row_y - card_h, 4, card_h, 2, fill=1, stroke=0)
+
+        draw_text(c, row["domain"], cx + 14, row_y - 20, 10, FONT_BOLD)
+        c.setFont(FONT, 9)
+        c.setFillColor(TEXT_SECONDARY)
+        c.drawString(cx + 14, row_y - 36, f"Delta: {row['delta']:+.1f}   RCI: {row['rci']:.2f}")
+        c.setFillColor(col)
+        c.setFont(FONT_BOLD, 10)
+        c.drawString(cx + 14, row_y - 54, flag)
+
+    # ---- Domain delta table (existing columns + one new reliability column) ----
+    rows  = pt["domain_rows"]
+    row_h = 20
+    tbl_y = row_y - card_h - 30
+    tbl_h = row_h * (len(rows) + 1)
+    tbl_w = PAGE_WIDTH - MARGIN * 2
+
+    draw_card(c, MARGIN, tbl_y - tbl_h, tbl_w, tbl_h, radius=10)
+
+    cx_domain = MARGIN + 14
+    cx_prev   = MARGIN + 220
+    cx_curr   = MARGIN + 300
+    cx_delta  = MARGIN + 380
+    cx_rel    = MARGIN + tbl_w - 14
+
+    hdr_y = tbl_y - row_h + 5
+    c.setFillColor(PRIMARY)
+    c.roundRect(MARGIN, tbl_y - row_h, tbl_w, row_h, 10, fill=1, stroke=0)
+    c.setFillColor(white)
+    c.setFont(FONT_BOLD, 8)
+    c.drawString(cx_domain, hdr_y, "DOMAIN")
+    c.drawString(cx_prev,   hdr_y, "PREVIOUS")
+    c.drawString(cx_curr,   hdr_y, "CURRENT")
+    c.drawString(cx_delta,  hdr_y, "DELTA")
+    c.drawRightString(cx_rel, hdr_y, "RELIABILITY")
+
+    for ri, row in enumerate(rows):
+        ry2 = tbl_y - row_h * (ri + 2)
+        c.setFillColor(SURFACE if ri % 2 == 0 else CARD_BG)
+        c.rect(MARGIN, ry2, tbl_w, row_h, fill=1, stroke=0)
+        text_y = ry2 + 6
+
+        c.setFont(FONT_BOLD, 8.5)
+        c.setFillColor(TEXT_PRIMARY)
+        c.drawString(cx_domain, text_y, row["domain"])
+
+        c.setFont(FONT, 8.5)
+        c.setFillColor(TEXT_MUTED)
+        c.drawString(cx_prev, text_y, str(row["previous"]))
+        c.drawString(cx_curr, text_y, str(row["current"]))
+
+        delta_color = SUCCESS if row["delta"] > 0 else (DANGER if row["delta"] < 0 else TEXT_MUTED)
+        c.setFont(FONT_BOLD, 8.5)
+        c.setFillColor(delta_color)
+        c.drawString(cx_delta, text_y, f"{row['delta']:+.1f}")
+
+        c.setFont(FONT, 8)
+        c.setFillColor(TEXT_MUTED)
+        c.drawRightString(cx_rel, text_y, row["reliability"])
+
+    c.setFont(FONT_OBL, 8)
+    c.setFillColor(TEXT_MUTED)
+    c.drawString(MARGIN, tbl_y - tbl_h - 16,
+                 "Reliable Change Index (RCI) applies formal statistical testing to the 12-item composite "
+                 "and overall scores; individual 4-item scales are noisier and shown as directional only.")
+
+
+# ============================================================
 # PAGE 10 — LEGAL & PRIVACY
 # ============================================================
 
-def draw_legal_page(c, data):
+def draw_legal_page(c, data, page_num=10):
     draw_page_header(c, "Legal, Privacy & Report Details",
-                     "Important information about this assessment and your data", 10)
+                     "Important information about this assessment and your data", page_num)
     draw_page_footer(c, data["report_id"])
 
     legal = data["legal"]
@@ -2780,6 +2307,67 @@ def draw_legal_page(c, data):
     c.drawRightString(PAGE_WIDTH - MARGIN - 18, brand_y - 24, legal.get("contact", "support@limitless.ai"))
     c.drawRightString(PAGE_WIDTH - MARGIN - 18, brand_y - 40,
                       f"Report ID: {data['report_id']}")
+
+
+# ============================================================
+# METHODOLOGY (v2 only, optional — ENABLE_METHODOLOGY_PAGE). Appended
+# after the very last existing page; never inserted mid-report, so
+# existing page order/count is unaffected whenever the flag is off.
+# ============================================================
+
+def draw_methodology_page(c, data, page_num):
+    draw_page_header(c, "Methodology & Scale Definitions",
+                     "How this report's v2 scores are calculated", page_num)
+    draw_page_footer(c, data["report_id"])
+
+    meth = data.get("methodology") or {"item_bank_version": "", "scales": []}
+    content_top = PAGE_HEIGHT - 88
+
+    # ---- Scale definitions ----
+    scales = meth["scales"]
+    row_h  = 46
+    tbl_h  = row_h * len(scales) + 30
+    draw_card(c, MARGIN, content_top - tbl_h, PAGE_WIDTH - MARGIN * 2, tbl_h, radius=14)
+    draw_text(c, "Scale Definitions", MARGIN + 16, content_top - 20, 13, FONT_BOLD)
+    draw_divider(c, MARGIN + 16, content_top - 30, PAGE_WIDTH - MARGIN * 2 - 32)
+
+    for si, sc in enumerate(scales):
+        sy = content_top - 44 - si * row_h
+        c.setFont(FONT_BOLD, 10)
+        c.setFillColor(TEXT_PRIMARY)
+        c.drawString(MARGIN + 16, sy, f"{sc['name']}  ({sc['weight_pct']}% weight)")
+        c.setFont(FONT, 9)
+        c.setFillColor(TEXT_SECONDARY)
+        wrap_text_in_box(c, sc["description"], MARGIN + 16, sy - 14,
+                         PAGE_WIDTH - MARGIN * 2 - 32, 9, line_height=12, max_lines=2)
+
+    # ---- Item bank / scoring formula / provisional notice / limitations ----
+    info_y = content_top - tbl_h - 16
+    info_h = 220
+    draw_card(c, MARGIN, info_y - info_h, PAGE_WIDTH - MARGIN * 2, info_h, radius=14)
+
+    blocks = [
+        ("Item Bank Version", meth["item_bank_version"]),
+        ("Scoring Formula", "Overall score is a fixed weighted average of the seven scale "
+            "scores above. The Cognitive Complaint Index and Modifiable Load Index composites "
+            "are the unweighted mean of their three constituent scales."),
+        ("Provisional Values", "Standard error, confidence intervals, cognitive age, and "
+            "percentile all use provisional statistical constants pending empirical calibration "
+            "against a normed population sample. Treat exact figures as directional, not clinical."),
+        ("Limitations", "This is a self-report wellness screening tool, not a diagnostic "
+            "instrument. It does not measure brain age, IQ, or clinical cognitive impairment. "
+            "Consult a licensed clinician for persistent symptoms."),
+    ]
+    by = info_y - 24
+    for title, body in blocks:
+        c.setFont(FONT_BOLD, 11)
+        c.setFillColor(TEXT_PRIMARY)
+        c.drawString(MARGIN + 16, by, title)
+        c.setFont(FONT, 9)
+        c.setFillColor(TEXT_SECONDARY)
+        wrap_text_in_box(c, body, MARGIN + 16, by - 16,
+                         PAGE_WIDTH - MARGIN * 2 - 32, 9, line_height=12, max_lines=3)
+        by -= 52
 
 
 # ============================================================
@@ -2881,8 +2469,23 @@ def build_report(analysis,brand=None):
     draw_cognitive_age_page(c, data)
     c.showPage()
 
-    draw_legal_page(c, data)
+    # Item 4 (v2 only, additive, new page): only inserted when the flag is on
+    # AND there is real reliable-change data — page count/order are otherwise
+    # identical to today (rule: v1 must remain byte-identical by default).
+    progress_page_shown = bool(settings.ENABLE_RELIABLE_CHANGE and data.get("progress_table"))
+    if progress_page_shown:
+        draw_progress_page(c, data, page_num=10)
+        c.showPage()
+
+    draw_legal_page(c, data, page_num=11 if progress_page_shown else 10)
     c.showPage()
+
+    # Optional methodology page — ENABLE_METHODOLOGY_PAGE only, always
+    # appended after the last existing page, never inserted mid-report.
+    if settings.ENABLE_METHODOLOGY_PAGE and data.get("methodology"):
+        next_page_num = 12 if progress_page_shown else 11
+        draw_methodology_page(c, data, page_num=next_page_num)
+        c.showPage()
 
     # ============================================
     # SAVE PDF
@@ -3005,13 +2608,16 @@ if __name__ == "__main__":
 
 def _draw_radar(c, cx, cy, radius, domains, fill=PRIMARY):
     """
-    8-axis radar / spider chart of domain scores (0-100).
+    N-axis radar / spider chart of domain scores (0-100) — 8 legacy domains
+    under v1, 7 v2 scales under v2 (the axis count is driven by the dict).
     Labels + scores sit just outside the outer ring, anchored by quadrant.
     """
     import math
     names = list(domains.keys())
     n = len(names)
-    short = {"Problem Solving": "Problem", "Reaction Time": "Reaction"}
+    # Display truncation only — the teaser's radar zone is narrow (radius 56),
+    # so long v2 scale names would otherwise run into the divider.
+    short = SHORT_LABELS
  
     def pt(frac, i):
         ang = math.radians(90 - i * (360.0 / n))
@@ -3112,8 +2718,15 @@ def draw_teaser_report(c, data):
     user       = data["user"]
     benchmarks = data["benchmarks"]
     strengths  = data["strengths"]
-    traffic    = data["traffic_light"]
     lifestyle  = data["lifestyle"]
+
+    # v2: 7 real scales replace the 8 legacy domains (3 of which were
+    # fabricated). Both fall back to today's exact values under v1, so the
+    # v1 teaser renders byte-identically.
+    radar_source = data.get("radar_domains") or data["domains"]
+    traffic      = data["traffic_light"]
+    axis_label   = f"{len(radar_source)} Scales" if data.get("model_version") == "v2" \
+                   else f"{len(radar_source)} Domains"
  
     inner_w = PAGE_WIDTH - 2 * MARGIN          # 515pt
     GAP     = 13
@@ -3173,10 +2786,12 @@ def draw_teaser_report(c, data):
     label_w = 60
     bar_x   = rx + label_w
     bar_w   = rw - label_w - 26
+    # Both cohort averages side by side (matches the full report's card).
     rows = [
-        ("You",      score,                       score_color(score)),
-        ("Peer Avg", benchmarks["peer_average"],  HexColor("#CBD5E1")),
-        ("Top 10%",  benchmarks["top_10_pct"],    SUCCESS),
+        ("You",        score,                                       score_color(score)),
+        ("Female Avg", benchmarks.get("peer_average_female", 0),     SECONDARY_LIGHT),
+        ("Male Avg",   benchmarks.get("peer_average_male",   0),     PRIMARY_LIGHT),
+        ("Top 10%",    benchmarks["top_10_pct"],                     SUCCESS),
     ]
     for label, val, clr in rows:
         draw_text(c, label, rx, ry, size=8, color=TEXT_SECONDARY)
@@ -3198,11 +2813,11 @@ def draw_teaser_report(c, data):
     draw_card(c, MARGIN, S3_Y, inner_w, S3_H, radius=14, border=True)
  
     radar_zone_w = 268
-    draw_text(c, "Brain Function - 8 Domains", MARGIN + 16, S3_Y + S3_H - 18,
+    draw_text(c, f"Brain Function - {axis_label}", MARGIN + 16, S3_Y + S3_H - 18,
               size=10, font=FONT_BOLD, color=TEXT_PRIMARY)
     radar_cx = MARGIN + radar_zone_w / 2
     radar_cy = S3_Y + S3_H / 2 - 6
-    _draw_radar(c, radar_cx, radar_cy, 56, data["domains"])
+    _draw_radar(c, radar_cx, radar_cy, 56, radar_source)
  
     # Vertical divider
     div_x = MARGIN + radar_zone_w
@@ -3331,7 +2946,7 @@ def draw_teaser_report(c, data):
     draw_divider(c, tx, S6_Y + S6_H - 30, inner_w - 36)
  
     items = [
-        "Core Brain Function (8 Domains)",
+        f"Core Brain Function ({axis_label})",
         "Root Cause Analysis",
         "Benchmark vs Age Group",
         "Future Risk Prediction (30 & 90 days)",

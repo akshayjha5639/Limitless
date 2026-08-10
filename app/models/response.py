@@ -69,6 +69,65 @@ class CognitiveAge(BaseModel):
     )
 
 
+# ---------------------------------------------------------------------------
+# v2 scoring model — additive sub-models (v1 models above are untouched)
+# ---------------------------------------------------------------------------
+
+class ScaleScore(BaseModel):
+    score:  float = Field(..., ge=0, le=100)
+    sem:    float = Field(..., ge=0)
+    ciLow:  float = Field(..., ge=0, le=100)
+    ciHigh: float = Field(..., ge=0, le=100)
+
+
+class ScalesV2(BaseModel):
+    attentionFocus:     ScaleScore
+    memoryRecall:        ScaleScore
+    executiveFunction:   ScaleScore
+    mentalEnergy:        ScaleScore
+    stressLoad:          ScaleScore
+    sleepRecovery:       ScaleScore
+    lifestyleModule:     ScaleScore
+
+
+class Composites(BaseModel):
+    cognitiveComplaintIndex: ScaleScore
+    modifiableLoadIndex:     ScaleScore
+
+
+class ValidityReport(BaseModel):
+    status: str
+    flags:  list[str] = Field(default_factory=list)
+
+
+class CognitiveAgeV2(BaseModel):
+    actualAge:              int
+    estimatedCognitiveAge:  Optional[int] = None
+    ageLow:                 Optional[int] = None
+    ageHigh:                Optional[int] = None
+    provisional:            bool = True
+    disclaimer:             str = Field(
+        default="Provisional wellness index — not a clinical measure of brain age."
+    )
+
+
+class PercentileV2(BaseModel):
+    value:       Optional[int] = None
+    provisional: bool = True
+
+
+class ReliableChangeEntry(BaseModel):
+    delta: float
+    rci:   float
+    flag:  str
+
+
+class ReliableChange(BaseModel):
+    cognitiveComplaintIndex: ReliableChangeEntry
+    modifiableLoadIndex:     ReliableChangeEntry
+    overall:                  ReliableChangeEntry
+
+
 class ProgressDelta(BaseModel):
     domain:     str
     previous:   float
@@ -142,6 +201,20 @@ class AnalyzeResponse(BaseModel):
     audit:              AuditInfo       = Field(default_factory=AuditInfo)
     disclaimers:        list[str]       = Field(default=MANDATORY_DISCLAIMERS)
     privacy:            PrivacyInfo     = Field(default_factory=PrivacyInfo)
+
+    # --- v2 scoring model — additive, optional, default None so v1 responses
+    #     are byte-for-byte unchanged when SCORING_MODEL_VERSION="v1" ---
+    scales:          Optional[ScalesV2]      = None
+    composites:      Optional[Composites]    = None
+    validity:        Optional[ValidityReport] = None
+    percentile:      Optional[PercentileV2]  = None
+    cognitiveAgeV2:  Optional[CognitiveAgeV2] = None
+    modelVersion:    str = "v1"
+
+    # --- Phase 5, additive — two-point RCI vs priorReport (v2-only, feeds
+    #     the PDF Progress page); None/False unless both reports are v2 ---
+    reliableChange:        Optional[ReliableChange] = None
+    retestIntervalWarning: bool = False
 
 class QuestionItem(BaseModel):
     id: str

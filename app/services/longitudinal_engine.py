@@ -20,11 +20,17 @@ Design decisions (confirmed with product owner, July 2026):
     sessions are available; below that it is empty (coefficients from
     2-3 samples are statistical noise).
 
-This module is intentionally dependency-free (stdlib only) so the maths
-can be unit-tested without FastAPI/Pydantic installed.
+This module is intentionally dependency-free (stdlib only, no
+FastAPI/Pydantic) so the maths can be unit-tested in isolation. The one
+exception is app.services.rci, itself a tiny stdlib-only pure-function
+module shared with analyze.py so the Reliable Change Index formula is
+defined exactly once (Phase 5).
 """
 
 from datetime import datetime, timezone
+import math
+
+from app.services.rci import compute_rci, MIN_RETEST_INTERVAL_DAYS
 
 
 # ============================================================
@@ -91,6 +97,13 @@ ATTRIBUTION_PAIRS = [
     ("lifestyle_burnout", "executiveFunction", "burnout_to_executive_coefficient"),
     ("lifestyle_anxiety", "mentalClarity",     "anxiety_to_clarity_coefficient"),
 ]
+
+# Mirrors app.scoring.engine_v2's provisional composite SD/alpha (kept as
+# local literals rather than an import, per this module's stdlib-only
+# design). Used as a proxy SEM for "overall" reliable-change, since v2 does
+# not define a dedicated overall-score SEM.
+COMPOSITE_SD    = 15.0   # provisional
+COMPOSITE_ALPHA = 0.85   # provisional, 12-item composite
 
 MIN_HISTORY_POINTS     = 2   # velocity needs at least one interval
 MIN_ATTRIBUTION_POINTS = 4   # below this, coefficients are noise
@@ -231,6 +244,26 @@ def normalize_session(record: dict) -> dict:
         else:                                       # categorical tag
             out[invariant_key] = IMPACT_TO_WELLNESS.get(str(raw), 50.0)
 
+    # Phase 5 (RCI): v2 composite score + SEM, when this session is a v2
+    # /analyze response. None for v1 sessions or malformed composite data —
+    # compute_reliable_change() gates on this rather than fabricating it.
+    out["composites"] = None
+    composites_raw = analysis.get("composites")
+    if analysis.get("modelVersion") == "v2" and isinstance(composites_raw, dict):
+        try:
+            out["composites"] = {
+                "cognitiveComplaintIndex": {
+                    "score": float(composites_raw["cognitiveComplaintIndex"]["score"]),
+                    "sem":   float(composites_raw["cognitiveComplaintIndex"]["sem"]),
+                },
+                "modifiableLoadIndex": {
+                    "score": float(composites_raw["modifiableLoadIndex"]["score"]),
+                    "sem":   float(composites_raw["modifiableLoadIndex"]["sem"]),
+                },
+            }
+        except (KeyError, TypeError, ValueError):
+            out["composites"] = None
+
     return out
 
 
@@ -351,6 +384,53 @@ def compute_attribution_matrix(sessions: list[dict]) -> dict:
         if coeff is not None:
             matrix[out_key] = coeff
     return matrix
+
+
+# ============================================================
+# 3.5. RELIABLE CHANGE INDEX (Phase 5, gated)
+# ============================================================
+
+def compute_reliable_change(sessions: list[dict]) -> tuple[dict, bool]:
+    """
+    Reliable Change Index between the two most recent sessions.
+
+    Applied to the 12-item composites (cognitiveComplaintIndex,
+    modifiableLoadIndex) and overall score — 4-item scales are too noisy
+    for a formal reliable-change verdict and are intentionally not scored
+    here (matches the "directional only" treatment used elsewhere for
+    individual scales).
+
+    Gated: ({}, False) when fewer than 2 sessions exist or the two most
+    recent sessions don't both carry v2 composite data (e.g. a v1 session,
+    or mixed v1/v2 history) — no fabricated statistics.
+    """
+    if len(sessions) < 2:
+        return {}, False
+
+    prev, curr = sessions[-2], sessions[-1]
+    if not prev.get("composites") or not curr.get("composites"):
+        return {}, False
+
+    overall_sem = COMPOSITE_SD * math.sqrt(1 - COMPOSITE_ALPHA)
+
+    reliable_change = {
+        "cognitiveComplaintIndex": compute_rci(
+            curr["composites"]["cognitiveComplaintIndex"]["score"],
+            prev["composites"]["cognitiveComplaintIndex"]["score"],
+            curr["composites"]["cognitiveComplaintIndex"]["sem"],
+        ),
+        "modifiableLoadIndex": compute_rci(
+            curr["composites"]["modifiableLoadIndex"]["score"],
+            prev["composites"]["modifiableLoadIndex"]["score"],
+            curr["composites"]["modifiableLoadIndex"]["sem"],
+        ),
+        "overall": compute_rci(curr["overall_score"], prev["overall_score"], overall_sem),
+    }
+
+    interval_days = (curr["_dt"] - prev["_dt"]).total_seconds() / 86400.0
+    retest_interval_warning = interval_days < MIN_RETEST_INTERVAL_DAYS
+
+    return reliable_change, retest_interval_warning
 
 
 # ============================================================
@@ -507,6 +587,7 @@ def run_longitudinal_analysis(history: list[dict], user_id: str | None = None) -
 
     trends      = compute_domain_trends(sessions)
     attribution = compute_attribution_matrix(sessions)
+    reliable_change, retest_interval_warning = compute_reliable_change(sessions)
 
     return {
         "user_id": user_id or "anonymous",
@@ -523,4 +604,8 @@ def run_longitudinal_analysis(history: list[dict], user_id: str | None = None) -
         "predictive_projections_calibrated": compute_projections(sessions),
         "contextual_ai_insights":
             generate_contextual_insights(sessions, trends, attribution),
+        # Phase 5, additive — {} / False when the two most recent sessions
+        # aren't both v2 (see compute_reliable_change docstring).
+        "reliable_change": reliable_change,
+        "retest_interval_warning": retest_interval_warning,
     }

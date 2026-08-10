@@ -51,6 +51,8 @@ class AnalyzeRequest(BaseModel):
     gender: GenderType
     responses: list[ResponseItem] = Field(..., min_length=1, max_length=28)
     priorReport: Optional[dict] = Field(default=None, description="Previous analysis JSON for delta tracking")
+    elapsedSeconds: Optional[int] = Field(default=None, description="Time taken to complete the assessment, for v2 speed-floor validity check")
+    itemBankVersion: Optional[str] = Field(default=None, description="Item bank version used to generate the questions")
 
     @model_validator(mode="after")
     def check_no_duplicate_item_ids(self) -> "AnalyzeRequest":
