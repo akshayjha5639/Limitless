@@ -1,6 +1,213 @@
 
 from datetime import datetime
 from app.scoring.engine import get_age_band
+from app.core.config import settings
+from app.scoring.engine_v2 import SCALE_WEIGHTS
+
+# ============================================================
+# v2 additive helpers (Phase 4) — report_mapper computes,
+# pdf_service.py only draws. None of this changes any existing
+# key in the dict returned by transform_analysis_to_report(); it
+# only adds new keys that are empty/None when v2 data is absent,
+# so v1 (or v2 with a flag off) output is unaffected.
+# ============================================================
+
+V2_SCALE_DISPLAY_NAMES = {
+    "attentionFocus":    "Attention & Focus",
+    "memoryRecall":       "Memory & Recall",
+    "executiveFunction":  "Executive Function",
+    "mentalEnergy":       "Mental Energy",
+    "stressLoad":         "Stress & Emotional Load",
+    "sleepRecovery":      "Sleep & Recovery",
+    "lifestyleModule":    "Lifestyle Module",
+}
+
+_LEGACY_DOMAIN_DISPLAY = {
+    "memory": "Memory", "attentionFocus": "Attention",
+    "processingSpeed": "Processing", "executiveFunction": "Executive",
+    "mentalClarity": "Clarity", "languageSkills": "Language",
+    "problemSolving": "Problem Solving", "reactionTime": "Reaction Time",
+}
+
+_COMPOSITE_DISPLAY = {
+    "cognitiveComplaintIndex": "Cognitive Complaint Index",
+    "modifiableLoadIndex":     "Modifiable Load Index",
+    "overall":                  "Overall Score",
+}
+
+# ---------------------------------------------------------------------------
+# Concept -> label resolution.
+#
+# The narrative generators (root causes, risk prediction, projections) refer to
+# cognitive concepts by name. Those names differ between the two vocabularies,
+# so each generator takes a label map instead of hardcoding strings. v1 keeps
+# the exact legacy labels, which is what makes v1 output byte-identical.
+#
+# Under v2, "clarity" resolves to Executive Function: v1's Mental Clarity was
+# the S3 section, which v2 reports as Executive Function. "processing" maps to
+# Mental Energy — v1's Processing Speed was a fabricated Mental Clarity x 0.9
+# proxy, so Mental Energy is the nearest scale that measures anything real.
+# ---------------------------------------------------------------------------
+
+CONCEPT_LABELS_V1 = {
+    "memory":     "Memory",
+    "attention":  "Attention",
+    "executive":  "Executive",
+    "clarity":    "Clarity",
+    "processing": "Processing",
+}
+
+CONCEPT_LABELS_V2 = {
+    "memory":     "Memory & Recall",
+    "attention":  "Attention & Focus",
+    "executive":  "Executive Function",
+    "clarity":    "Executive Function",
+    "processing": "Mental Energy",
+}
+
+# Score-breakdown weights per vocabulary (v2 mirrors engine_v2.SCALE_WEIGHTS)
+V2_BREAKDOWN_WEIGHTS = {
+    V2_SCALE_DISPLAY_NAMES[k]: w for k, w in SCALE_WEIGHTS.items()
+}
+
+V2_STRENGTH_BADGES = {
+    "Attention & Focus":       {"badge": "Focused Mind",         "icon": "🔍"},
+    "Memory & Recall":         {"badge": "Sharp Memory",         "icon": "🧠"},
+    "Executive Function":      {"badge": "Strategic Thinker",    "icon": "♟"},
+    "Mental Energy":           {"badge": "High Mental Stamina",  "icon": "⚡"},
+    "Stress & Emotional Load": {"badge": "Resilient Under Load", "icon": "🛡"},
+    "Sleep & Recovery":        {"badge": "Well Recovered",       "icon": "🌙"},
+    "Lifestyle Module":        {"badge": "Strong Daily Habits",  "icon": "🌱"},
+}
+
+V2_STRENGTH_DESCRIPTIONS = {
+    "Attention & Focus":
+        "Sustained attention holds up well against distraction during demanding tasks.",
+    "Memory & Recall":
+        "Retention and recall of recently learned information remain reliable.",
+    "Executive Function":
+        "Planning, decision-making, and cognitive flexibility remain balanced under complexity.",
+    "Mental Energy":
+        "Mental stamina is well maintained, with good resistance to cognitive fatigue.",
+    "Stress & Emotional Load":
+        "Stress burden is well managed and is not meaningfully impairing daily functioning.",
+    "Sleep & Recovery":
+        "Sleep quality is supporting effective next-day cognitive recovery.",
+    "Lifestyle Module":
+        "Daily routines and recovery habits are actively supporting cognitive wellness.",
+}
+
+
+def _v2_radar_and_confidence(analysis: dict, domains: dict) -> tuple[dict, dict]:
+    """Item 1 (radar) + item 2 (scale bars) source data.
+
+    radar_domains: label -> score. 7 real v2 scales when v2 is active,
+    otherwise the same legacy 8-domain dict already used today (so the
+    radar chart / brain performance bars render identically when v1).
+
+    scale_confidence: label -> {sem, ciLow, ciHigh}. Only populated when
+    v2 is active AND ENABLE_CONFIDENCE_INTERVALS is on — empty otherwise,
+    which is what keeps the scale-bar drawing unchanged by default.
+    """
+    scales = analysis.get("scales")
+    if analysis.get("modelVersion") != "v2" or not scales:
+        return domains, {}
+
+    radar_domains = {
+        V2_SCALE_DISPLAY_NAMES[k]: scales[k]["score"] for k in V2_SCALE_DISPLAY_NAMES
+    }
+
+    scale_confidence = {}
+    if settings.ENABLE_CONFIDENCE_INTERVALS:
+        scale_confidence = {
+            V2_SCALE_DISPLAY_NAMES[k]: {
+                "sem": scales[k]["sem"], "ciLow": scales[k]["ciLow"], "ciHigh": scales[k]["ciHigh"],
+            }
+            for k in V2_SCALE_DISPLAY_NAMES
+        }
+
+    return radar_domains, scale_confidence
+
+
+def _cognitive_age_range(analysis: dict) -> dict | None:
+    """Item 3 — Cognitive Age page range + provisional footnote."""
+    cog_v2 = analysis.get("cognitiveAgeV2")
+    if not cog_v2 or cog_v2.get("ageLow") is None or cog_v2.get("ageHigh") is None:
+        return None
+    return {
+        "low":  cog_v2["ageLow"],
+        "high": cog_v2["ageHigh"],
+        "disclaimer": cog_v2.get("disclaimer", ""),
+    }
+
+
+def _progress_table(analysis: dict) -> dict | None:
+    """Item 4 — Progress page data. Only built when Phase 5's reliable-change
+    data is actually present (two-point RCI requires v2 + SEM on both the
+    current and prior report) — the PDF only ever adds the new page when
+    there is real reliable-change data to show, never speculatively."""
+    reliable_change = analysis.get("reliableChange")
+    if not reliable_change:
+        return None
+
+    deltas = (analysis.get("progress") or {}).get("deltas") or []
+    domain_rows = [
+        {
+            "domain":      _LEGACY_DOMAIN_DISPLAY.get(d["domain"], d["domain"]),
+            "previous":    d["previous"],
+            "current":     d["current"],
+            "delta":       d["delta"],
+            # 4-item scales are noisy — only the 12-item composites/overall
+            # below get a formal reliable-change verdict (see Phase 5 note).
+            "reliability": "Directional only",
+        }
+        for d in deltas
+    ]
+
+    composite_rows = []
+    for key, label in _COMPOSITE_DISPLAY.items():
+        entry = reliable_change.get(key)
+        if entry:
+            composite_rows.append({
+                "domain": label,
+                "delta":  entry["delta"],
+                "rci":    entry["rci"],
+                "flag":   entry["flag"],
+            })
+
+    if not domain_rows and not composite_rows:
+        return None
+
+    return {"domain_rows": domain_rows, "composite_rows": composite_rows}
+
+
+SCALE_DESCRIPTIONS = {
+    "attentionFocus":    "Sustained attention and resistance to distraction during demanding tasks.",
+    "memoryRecall":       "Short-term retention and recall of recently learned information.",
+    "executiveFunction":  "Planning, decision-making, and cognitive flexibility under complexity.",
+    "mentalEnergy":       "Subjective mental stamina and resistance to cognitive fatigue.",
+    "stressLoad":         "Self-reported stress burden and its perceived impact on daily functioning.",
+    "sleepRecovery":      "Sleep quality and its contribution to next-day cognitive recovery.",
+    "lifestyleModule":    "Broader lifestyle factors (activity, routine, recovery habits) linked to wellness.",
+}
+
+
+def _methodology(analysis: dict) -> dict | None:
+    """Optional methodology page (Phase 4) source data — v2 only."""
+    if analysis.get("modelVersion") != "v2":
+        return None
+    return {
+        "item_bank_version": settings.ITEM_BANK_VERSION,
+        "scales": [
+            {
+                "name":        V2_SCALE_DISPLAY_NAMES[k],
+                "description": SCALE_DESCRIPTIONS[k],
+                "weight_pct":  round(SCALE_WEIGHTS[k] * 100),
+            }
+            for k in V2_SCALE_DISPLAY_NAMES
+        ],
+    }
+
 
 def transform_analysis_to_report(analysis: dict) -> dict:
 
@@ -14,6 +221,22 @@ def transform_analysis_to_report(analysis: dict) -> dict:
         "Problem Solving": analysis["domains"]["problemSolving"],
         "Reaction Time": analysis["domains"]["reactionTime"],
     }
+
+    radar_domains, scale_confidence = _v2_radar_and_confidence(analysis, domains)
+    validity_status     = (analysis.get("validity") or {}).get("status")
+    cognitive_age_range = _cognitive_age_range(analysis)
+    progress_table       = _progress_table(analysis)
+    methodology          = _methodology(analysis)
+
+    # `active` is the vocabulary the whole report narrates: the 7 real v2
+    # scales when v2 is on, otherwise the legacy 8 domains. Under v1
+    # _v2_radar_and_confidence returns the `domains` dict itself, so every
+    # downstream generator receives exactly what it received before and v1
+    # output stays byte-identical.
+    is_v2   = analysis.get("modelVersion") == "v2"
+    active  = radar_domains
+    labels  = CONCEPT_LABELS_V2 if is_v2 else CONCEPT_LABELS_V1
+    weights = V2_BREAKDOWN_WEIGHTS if is_v2 else None
 
     # ============================================================
     # Helpers
@@ -77,8 +300,11 @@ def transform_analysis_to_report(analysis: dict) -> dict:
     "Processing":      {"badge": "Quick Processor",            "icon": "⚙"},
     "Clarity":         {"badge": "Clear Thinker",              "icon": "💡"},
     }
+    if is_v2:
+        STRENGTH_BADGES = V2_STRENGTH_BADGES
+
     sorted_domains = sorted(
-        domains.items(),
+        active.items(),
         key=lambda x: x[1],
         reverse=True
     )
@@ -126,7 +352,7 @@ def transform_analysis_to_report(analysis: dict) -> dict:
             analysis["recommendations"][:4],
 
         "improvement_projection":
-            generate_projection(domains,analysis["cognitiveAge"]["actualAge"])
+            generate_projection(active,analysis["cognitiveAge"]["actualAge"],labels)
     }
 
     # ============================================================
@@ -190,12 +416,12 @@ def transform_analysis_to_report(analysis: dict) -> dict:
         },
 
         "domains": domains,
-        
-        "score_breakdown": generate_score_breakdown(domains),
-        "traffic_light":   generate_traffic_light(domains),
+
+        "score_breakdown": generate_score_breakdown(active, weights),
+        "traffic_light":   generate_traffic_light(active),
         "lifestyle": lifestyle,
-        
-        "root_causes": generate_root_causes(lifestyle, domains),
+
+        "root_causes": generate_root_causes(lifestyle, active, labels),
 
         "benchmarks": generate_benchmarks(
             age=analysis["cognitiveAge"]["actualAge"],
@@ -204,9 +430,10 @@ def transform_analysis_to_report(analysis: dict) -> dict:
         ),
         "risk_prediction": generate_risk_prediction(
             lifestyle=lifestyle,
-            domains=domains,
+            domains=active,
             overall_score=analysis["overall"]["score"],
             age=analysis["cognitiveAge"]["actualAge"],
+            labels=labels,
         ),
         "executive_summary": executive_summary,
 
@@ -219,6 +446,16 @@ def transform_analysis_to_report(analysis: dict) -> dict:
         "roadmap": roadmap,
 
         "cognitive_age": generate_cognitive_age_section(age, est_age),
+
+        # --- v2 additive keys (Phase 4) — all None/empty unless v2 data is
+        # present, so v1 output (and v2 with flags off) is unaffected ---
+        "model_version":       analysis.get("modelVersion", "v1"),
+        "radar_domains":      radar_domains,
+        "scale_confidence":   scale_confidence,
+        "validity_status":    validity_status,
+        "cognitive_age_range": cognitive_age_range,
+        "progress_table":      progress_table,
+        "methodology":         methodology,
 
         "legal": {
             "disclaimer":
@@ -294,18 +531,35 @@ BENCHMARKS = {
 }
 
 def generate_benchmarks(age: int, gender: str, overall_score: float) -> dict:
+    """
+    Peer benchmarks for the user's age band.
 
-    band   = get_age_band(age)
-    gender_key = gender.lower() if gender.lower() in ("male", "female") else "female"
+    The report shows BOTH the female and male cohort averages side by side
+    rather than silently picking one by the user's gender, so the comparison
+    is not framed around a single cohort.
 
-    # Average male and female for non-binary / prefer not to say
-    if gender_key not in ("male", "female"):
-        m = BENCHMARKS[band]["male"]
-        f = BENCHMARKS[band]["female"]
-        peer_avg = int((m[0] + f[0]) / 2)
-        top_10   = int((m[1] + f[1]) / 2)
-    else:
+    The percentile is still computed against the user's own cohort (that is
+    what makes it a meaningful "where do I sit" number); non-binary and
+    prefer-not-to-say are scored against the mean of both cohorts.
+    """
+    band = get_age_band(age)
+
+    female_avg, female_top = BENCHMARKS[band]["female"]
+    male_avg,   male_top   = BENCHMARKS[band]["male"]
+
+    gender_key = (gender or "").lower()
+
+    if gender_key in ("male", "female"):
         peer_avg, top_10 = BENCHMARKS[band][gender_key]
+        cohort_label = gender_key.capitalize()
+    else:
+        # Non-binary / prefer-not-to-say -> mean of both cohorts.
+        # (The original code intended this but the branch was unreachable:
+        # gender_key had already been coerced to "female" on the line above,
+        # so these users were silently scored against female benchmarks.)
+        peer_avg = int((male_avg + female_avg) / 2)
+        top_10   = int((male_top + female_top) / 2)
+        cohort_label = "All genders"
 
     # Compute rough percentile
     if overall_score >= top_10:
@@ -338,18 +592,35 @@ def generate_benchmarks(age: int, gender: str, overall_score: float) -> dict:
 
     return {
         "user_score":   int(overall_score),
+        # Cohort used for the percentile maths (user's own gender, or the
+        # mean of both for non-binary / prefer-not-to-say).
         "peer_average": peer_avg,
         "top_10_pct":   top_10,
         "percentile":   percentile,
+        # Both cohort averages, shown side by side in the report.
+        "peer_average_female": female_avg,
+        "peer_average_male":   male_avg,
         "band_label":   band_labels.get(band, "Your Age Group"),
-        "gender_label": gender_key.capitalize(),
+        "cohort_label": cohort_label,
+        # Retained for backward compatibility with any existing consumer;
+        # the report no longer frames the comparison by gender.
+        "gender_label": cohort_label,
     }
 def generate_risk_prediction(
     lifestyle: dict,
     domains: dict,
     overall_score: float,
     age: int,
+    labels: dict | None = None,
 ) -> dict:
+
+    # labels=None keeps the legacy v1 vocabulary, so v1 output is unchanged.
+    L = labels or CONCEPT_LABELS_V1
+    NAME_MEMORY     = L["memory"]
+    NAME_ATTENTION  = L["attention"]
+    NAME_EXECUTIVE  = L["executive"]
+    NAME_CLARITY    = L["clarity"]
+    NAME_PROCESSING = L["processing"]
 
     band = get_age_band(age)
 
@@ -368,59 +639,59 @@ def generate_risk_prediction(
 
     if lifestyle.get("Sleep", 100) <= 30:
         no_action_declines.append({
-            "domain":      "Memory",
-            "current":     int(domains.get("Memory", 0)),
-            "projected":   max(0, int(domains.get("Memory", 0)) - 10),
+            "domain":      NAME_MEMORY,
+            "current":     int(domains.get(NAME_MEMORY, 0)),
+            "projected":   max(0, int(domains.get(NAME_MEMORY, 0)) - 10),
             "decline_pct": 12,
         })
         no_action_declines.append({
-            "domain":      "Attention",
-            "current":     int(domains.get("Attention", 0)),
-            "projected":   max(0, int(domains.get("Attention", 0)) - 8),
+            "domain":      NAME_ATTENTION,
+            "current":     int(domains.get(NAME_ATTENTION, 0)),
+            "projected":   max(0, int(domains.get(NAME_ATTENTION, 0)) - 8),
             "decline_pct": 8,
         })
     elif lifestyle.get("Sleep", 100) <= 60:
         no_action_declines.append({
-            "domain":      "Memory",
-            "current":     int(domains.get("Memory", 0)),
-            "projected":   max(0, int(domains.get("Memory", 0)) - 6),
+            "domain":      NAME_MEMORY,
+            "current":     int(domains.get(NAME_MEMORY, 0)),
+            "projected":   max(0, int(domains.get(NAME_MEMORY, 0)) - 6),
             "decline_pct": 8,
         })
 
     if lifestyle.get("Stress", 100) <= 30:
         no_action_declines.append({
-            "domain":      "Attention",
-            "current":     int(domains.get("Attention", 0)),
-            "projected":   max(0, int(domains.get("Attention", 0)) - 10),
+            "domain":      NAME_ATTENTION,
+            "current":     int(domains.get(NAME_ATTENTION, 0)),
+            "projected":   max(0, int(domains.get(NAME_ATTENTION, 0)) - 10),
             "decline_pct": 12,
         })
         no_action_declines.append({
-            "domain":      "Executive",
-            "current":     int(domains.get("Executive", 0)),
-            "projected":   max(0, int(domains.get("Executive", 0)) - 7),
+            "domain":      NAME_EXECUTIVE,
+            "current":     int(domains.get(NAME_EXECUTIVE, 0)),
+            "projected":   max(0, int(domains.get(NAME_EXECUTIVE, 0)) - 7),
             "decline_pct": 8,
         })
     elif lifestyle.get("Stress", 100) <= 60:
         no_action_declines.append({
-            "domain":      "Attention",
-            "current":     int(domains.get("Attention", 0)),
-            "projected":   max(0, int(domains.get("Attention", 0)) - 6),
+            "domain":      NAME_ATTENTION,
+            "current":     int(domains.get(NAME_ATTENTION, 0)),
+            "projected":   max(0, int(domains.get(NAME_ATTENTION, 0)) - 6),
             "decline_pct": 8,
         })
 
     if lifestyle.get("Anxiety", 100) <= 30:
         no_action_declines.append({
-            "domain":      "Clarity",
-            "current":     int(domains.get("Clarity", 0)),
-            "projected":   max(0, int(domains.get("Clarity", 0)) - 8),
+            "domain":      NAME_CLARITY,
+            "current":     int(domains.get(NAME_CLARITY, 0)),
+            "projected":   max(0, int(domains.get(NAME_CLARITY, 0)) - 8),
             "decline_pct": 10,
         })
 
     if lifestyle.get("Burnout", 100) <= 30:
         no_action_declines.append({
-            "domain":      "Processing",
-            "current":     int(domains.get("Processing", 0)),
-            "projected":   max(0, int(domains.get("Processing", 0)) - 12),
+            "domain":      NAME_PROCESSING,
+            "current":     int(domains.get(NAME_PROCESSING, 0)),
+            "projected":   max(0, int(domains.get(NAME_PROCESSING, 0)) - 12),
             "decline_pct": 15,
         })
 
@@ -610,9 +881,13 @@ def generate_strength_description(name):
             "Mental clarity and cognitive sharpness remain stable.",
     }
 
+    # v2 scale names fall through to the v2 table; unknown names to the default.
     return descriptions.get(
         name,
-        "Performance in this domain remains stable."
+        V2_STRENGTH_DESCRIPTIONS.get(
+            name,
+            "Performance in this domain remains stable."
+        )
     )
 
 
@@ -624,15 +899,19 @@ def generate_indicator_description(item):
     )
 
 
-def generate_projection(domains,age):
+def generate_projection(domains,age,labels=None):
 
     projection = {}
 
-    target_domains = [
-        "Memory",
-        "Attention",
-        "Clarity"
-    ]
+    # labels=None keeps the legacy v1 vocabulary, so v1 output is unchanged.
+    # dict.fromkeys de-duplicates while preserving order: under v2 "clarity"
+    # and "executive" both resolve to Executive Function.
+    L = labels or CONCEPT_LABELS_V1
+    target_domains = list(dict.fromkeys([
+        L["memory"],
+        L["attention"],
+        L["clarity"],
+    ]))
     band = get_age_band(age)
     boost = {
         "young_adult":            22,
@@ -656,8 +935,10 @@ def generate_projection(domains,age):
 
     return projection
 
-def generate_root_causes(lifestyle: dict, domains: dict) -> list:
+def generate_root_causes(lifestyle: dict, domains: dict, labels: dict | None = None) -> list:
 
+    # labels=None keeps the legacy v1 vocabulary, so v1 output is unchanged.
+    L = labels or CONCEPT_LABELS_V1
     candidates = []
 
     # Lifestyle-based causes
@@ -708,21 +989,21 @@ def generate_root_causes(lifestyle: dict, domains: dict) -> list:
         })
 
     # Domain-based causes
-    if domains.get("Memory", 100) < 50:
+    if domains.get(L["memory"], 100) < 50:
         candidates.append({
             "factor":      "Memory consolidation deficit",
             "impact_pct":  20,
             "description": "Low memory scores suggest difficulty encoding and retrieving information.",
         })
 
-    if domains.get("Attention", 100) < 50:
+    if domains.get(L["attention"], 100) < 50:
         candidates.append({
             "factor":      "Sustained attention difficulty",
             "impact_pct":  18,
             "description": "Attention scores indicate difficulty maintaining focus on demanding tasks.",
         })
 
-    if domains.get("Clarity", 100) < 50:
+    if domains.get(L["clarity"], 100) < 50:
         candidates.append({
             "factor":      "Reduced mental clarity",
             "impact_pct":  15,
@@ -774,9 +1055,10 @@ def generate_roadmap(recommendations):
         })
 
     return roadmap
-def generate_score_breakdown(domains):
+def generate_score_breakdown(domains, weights=None):
 
-    weights = {
+    # weights=None keeps the legacy v1 domain weights, so v1 output is unchanged.
+    weights = weights or {
         "Memory":        0.20,
         "Attention":     0.20,
         "Processing":    0.15,
