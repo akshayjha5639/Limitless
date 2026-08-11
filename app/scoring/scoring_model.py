@@ -1,16 +1,18 @@
 """
 Limitless Cognitive Wellness Platform
-Scoring Engine — v2.0 (additive, parallel to engine.py — v1 is untouched)
+Scoring model — the single source of every score the product reports.
 
-v2 reports one real scale per section (no fabricated proxies): the three
-domains v1 fabricated (hardcoded Reaction Time, ±5 Language/Problem-Solving
-derivations, Mental Clarity × 0.9 Processing Speed) are dropped entirely.
+One scale per questionnaire section, and nothing else. An earlier revision
+also reported Reaction Time (hardcoded to 70), Language Skills and Problem
+Solving (each a +/-5 derivation of another score), and Processing Speed
+(Mental Clarity x 0.9). None of those measured anything the questionnaire
+asked about, so they are gone rather than reported as if they were real.
 
 Pipeline: Raw responses (0-4) -> Section averages -> Normalize/invert (0-100)
           -> 7 scale scores -> composites + overall -> cognitive age /
           percentile / validity (all provisional, clearly labelled as such).
 
-Reused from engine.py (v1): get_age_band, parse_responses,
+Shared primitives live in engine.py: get_age_band, parse_responses,
 compute_section_averages, normalize_invert, SectionScores, DomainScores,
 compute_lifestyle_impacts, compute_risk_indicators, RATING_BANDS,
 VALID_AGE_RANGE, SECTION_IDS, ITEMS_PER_SECTION.
@@ -29,8 +31,8 @@ from app.scoring.engine import (
     SectionScores,
     DomainScores,
     LifestyleImpacts,
-    compute_lifestyle_impacts as _v1_compute_lifestyle_impacts,
-    compute_risk_indicators as _v1_compute_risk_indicators,
+    compute_lifestyle_impacts as _compute_lifestyle_impacts,
+    compute_risk_indicators as _compute_risk_indicators,
     RATING_BANDS,
     VALID_AGE_RANGE,
     SECTION_IDS,
@@ -107,7 +109,7 @@ class ScaleResult:
 
 
 @dataclass
-class ScalesV2Result:
+class ScalesResult:
     attentionFocus:     ScaleResult
     memoryRecall:        ScaleResult
     executiveFunction:   ScaleResult
@@ -124,7 +126,7 @@ class CompositesResult:
 
 
 @dataclass
-class CognitiveAgeV2Result:
+class CognitiveAgeResult:
     actualAge:             int
     estimatedCognitiveAge: Optional[int]
     ageLow:                Optional[int]
@@ -136,7 +138,7 @@ class CognitiveAgeV2Result:
 
 
 @dataclass
-class PercentileV2Result:
+class PercentileResult:
     value:       Optional[int]
     provisional: bool = True
 
@@ -148,16 +150,16 @@ class ValidityResult:
 
 
 @dataclass
-class ScoringResultV2:
+class ScoringResult:
     overall_score:     float
     rating:             str
-    scales:             ScalesV2Result
+    scales:             ScalesResult
     composites:         CompositesResult
     lifestyle_impacts:  LifestyleImpacts
     risk_indicators:    list[str]
     strengths:          list[str]
-    cognitive_age:      CognitiveAgeV2Result
-    percentile:         PercentileV2Result
+    cognitive_age:      CognitiveAgeResult
+    percentile:         PercentileResult
     validity:           ValidityResult
     audit:              dict = field(default_factory=dict)
 
@@ -212,7 +214,7 @@ def compute_composites_raw(scale_rounded: dict[str, float]) -> dict[str, float]:
 # 2.3 — Overall score & rating (weighted average of the seven scales)
 # ---------------------------------------------------------------------------
 
-def compute_overall_v2(scale_rounded: dict[str, float]) -> tuple[float, str]:
+def compute_overall(scale_rounded: dict[str, float]) -> tuple[float, str]:
     total_weight = sum(SCALE_WEIGHTS.values())
     overall = sum(scale_rounded[k] * (w / total_weight) for k, w in SCALE_WEIGHTS.items())
     overall = round(overall, 2)
@@ -230,9 +232,9 @@ def compute_overall_v2(scale_rounded: dict[str, float]) -> tuple[float, str]:
 # 2.5 — Cognitive age (rebased expected-score-by-age curve)
 # ---------------------------------------------------------------------------
 
-def compute_cognitive_age_v2(age: int, overall_score: float) -> CognitiveAgeV2Result:
+def compute_cognitive_age(age: int, overall_score: float) -> CognitiveAgeResult:
     if age < COGNITIVE_AGE_MIN_AGE:
-        return CognitiveAgeV2Result(
+        return CognitiveAgeResult(
             actualAge=age, estimatedCognitiveAge=None, ageLow=None, ageHigh=None,
         )
 
@@ -240,7 +242,7 @@ def compute_cognitive_age_v2(age: int, overall_score: float) -> CognitiveAgeV2Re
     cognitive_age = age - (deviation / 2.5)
     cognitive_age = _clamp(cognitive_age, 18, 80)
 
-    return CognitiveAgeV2Result(
+    return CognitiveAgeResult(
         actualAge=age,
         estimatedCognitiveAge=int(round(cognitive_age)),
         ageLow=int(round(_clamp(cognitive_age - 3, 18, 80))),
@@ -252,14 +254,14 @@ def compute_cognitive_age_v2(age: int, overall_score: float) -> CognitiveAgeV2Re
 # 2.6 — Percentile (provisional, normal CDF via math.erf — no scipy)
 # ---------------------------------------------------------------------------
 
-def compute_percentile_v2(age: int, overall_score: float) -> PercentileV2Result:
+def compute_percentile(age: int, overall_score: float) -> PercentileResult:
     mean = expected_score(age)
     std = SCALE_SD
     z = (overall_score - mean) / std
     cdf = 0.5 * (1 + math.erf(z / math.sqrt(2)))
     pct = int(round(cdf * 100))
     pct = max(1, min(99, pct))
-    return PercentileV2Result(value=pct)
+    return PercentileResult(value=pct)
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +347,7 @@ def check_response_validity(
 # output, so v2 strengths are computed directly from the 7 real scales.
 # ---------------------------------------------------------------------------
 
-def compute_strengths_v2(scale_rounded: dict[str, float]) -> list[str]:
+def compute_strengths(scale_rounded: dict[str, float]) -> list[str]:
     return [
         SCALE_DISPLAY_NAMES[k] for k, v in scale_rounded.items() if v >= 80
     ]
@@ -361,12 +363,12 @@ def compute_strengths_v2(scale_rounded: dict[str, float]) -> list[str]:
 # (v1 fabricated them) and are never read by these two functions — filled
 # with the nearest real v2 scale purely to satisfy the dataclass shape.
 #
-# build_v1_shims is public (not module-private) because app/api/routes/analyze.py
+# build_rule_engine_shims is public (not module-private) because app/api/routes/analyze.py
 # also needs it to call app.services.recommendations.build_recommendations(),
 # which likewise only expects the SectionScores/DomainScores shape.
 # ---------------------------------------------------------------------------
 
-def build_v1_shims(scale_rounded: dict[str, float]) -> tuple[SectionScores, DomainScores]:
+def build_rule_engine_shims(scale_rounded: dict[str, float]) -> tuple[SectionScores, DomainScores]:
     section_scores = SectionScores(
         focus_attention=          scale_rounded["attentionFocus"],
         memory_function=          scale_rounded["memoryRecall"],
@@ -381,7 +383,7 @@ def build_v1_shims(scale_rounded: dict[str, float]) -> tuple[SectionScores, Doma
         attention_focus=    scale_rounded["attentionFocus"],
         executive_function= scale_rounded["executiveFunction"],
         # No v2 equivalent; unused by compute_lifestyle_impacts/compute_risk_indicators,
-        # never surfaced in ScoringResultV2 — nearest real v2 scale used as filler only.
+        # never surfaced in ScoringResult — nearest real v2 scale used as filler only.
         processing_speed=   scale_rounded["mentalEnergy"],
         mental_clarity=     scale_rounded["executiveFunction"],
         language_skills=    scale_rounded["memoryRecall"],
@@ -395,13 +397,13 @@ def build_v1_shims(scale_rounded: dict[str, float]) -> tuple[SectionScores, Doma
 # 2.8 — Entry point
 # ---------------------------------------------------------------------------
 
-def score_v2(
+def score_assessment(
     age: int,
     gender: str,
     responses: list[dict],
     elapsed_seconds: Optional[int] = None,
     reverse_item_ids: Optional[list[str]] = None,
-) -> ScoringResultV2:
+) -> ScoringResult:
     if not (VALID_AGE_RANGE[0] <= age <= VALID_AGE_RANGE[1]):
         raise ValueError(
             f"Age {age} is outside supported range ({VALID_AGE_RANGE[0]}-{VALID_AGE_RANGE[1]})."
@@ -423,7 +425,7 @@ def score_v2(
 
     # Scales + composites
     scale_raw = compute_scale_scores_raw(averages)
-    scales = ScalesV2Result(**{
+    scales = ScalesResult(**{
         k: _apply_ci(v, SCALE_SD, SCALE_ALPHA) for k, v in scale_raw.items()
     })
     scale_rounded = {k: sc.score for k, sc in vars(scales).items()}
@@ -434,19 +436,19 @@ def score_v2(
     })
 
     # Overall + rating
-    overall_score, rating = compute_overall_v2(scale_rounded)
+    overall_score, rating = compute_overall(scale_rounded)
 
     # Cognitive age + percentile
-    cognitive_age = compute_cognitive_age_v2(age, overall_score)
-    percentile = compute_percentile_v2(age, overall_score)
+    cognitive_age = compute_cognitive_age(age, overall_score)
+    percentile = compute_percentile(age, overall_score)
 
     # Lifestyle impacts + risk indicators (reused from v1 via shims)
-    section_scores, domain_scores = build_v1_shims(scale_rounded)
-    lifestyle_impacts = _v1_compute_lifestyle_impacts(section_scores)
-    risk_indicators = _v1_compute_risk_indicators(section_scores, domain_scores, age, overall_score)
+    section_scores, domain_scores = build_rule_engine_shims(scale_rounded)
+    lifestyle_impacts = _compute_lifestyle_impacts(section_scores)
+    risk_indicators = _compute_risk_indicators(section_scores, domain_scores, age, overall_score)
 
-    # Strengths (v2-native, not reused — see comment above compute_strengths_v2)
-    strengths = compute_strengths_v2(scale_rounded)
+    # Strengths (v2-native, not reused — see comment above compute_strengths)
+    strengths = compute_strengths(scale_rounded)
 
     # Validity
     validity_dict = check_response_validity(parsed, elapsed_seconds, reverse_item_ids)
@@ -455,7 +457,7 @@ def score_v2(
     audit["rules_version"] = "2.0"
     audit["age_cohort"] = get_age_band(age)
 
-    return ScoringResultV2(
+    return ScoringResult(
         overall_score=     overall_score,
         rating=             rating,
         scales=             scales,

@@ -67,12 +67,13 @@ class TestAnalyzeHappyPath:
         score = r.json()["overall"]["score"]
         assert 0 <= score <= 100
 
-    def test_all_8_domains_present(self):
+    def test_all_7_scales_present(self):
         r = client.post(BASE_URL, json=_payload(FIXTURE_MODERATE))
         domains = r.json()["domains"]
-        for key in ["memory", "attentionFocus", "processingSpeed", "executiveFunction",
-                    "mentalClarity", "languageSkills", "problemSolving", "reactionTime"]:
+        for key in ["attentionFocus", "memoryRecall", "executiveFunction",
+                    "mentalEnergy", "stressLoad", "sleepRecovery", "lifestyleModule"]:
             assert key in domains
+            assert 0 <= domains[key]["score"] <= 100
 
     def test_three_mandatory_disclaimers_present(self):
         r = client.post(BASE_URL, json=_payload(FIXTURE_MODERATE))
@@ -91,7 +92,7 @@ class TestAnalyzeHappyPath:
         cog = r.json()["cognitiveAge"]
         assert cog["actualAge"] == 22
         assert cog["estimatedCognitiveAge"] is None
-        assert "wellness metric" in cog["disclaimer"].lower()
+        assert "wellness" in cog["disclaimer"].lower()
 
 
 # ===========================================================================
@@ -158,11 +159,11 @@ class TestRecommendations:
 # ===========================================================================
 
 class TestChartData:
-    def test_radar_has_8_labels_and_8_values(self):
+    def test_radar_has_7_labels_and_7_values(self):
         r = client.post(BASE_URL, json=_payload(FIXTURE_MODERATE))
         radar = r.json()["charts"]["radarDomains"]
-        assert len(radar["labels"]) == 8
-        assert len(radar["values"]) == 8
+        assert len(radar["labels"]) == 7
+        assert len(radar["values"]) == 7
 
     def test_bar_has_4_lifestyle_factors(self):
         r = client.post(BASE_URL, json=_payload(FIXTURE_MODERATE))
@@ -268,8 +269,8 @@ class TestAudit:
     def test_audit_has_version_and_cohort(self):
         r = client.post(BASE_URL, json=_payload(FIXTURE_MODERATE))
         audit = r.json()["audit"]
-        assert audit["rules_version"] == "1.0"
-        assert audit["age_cohort"] == "18-25"
+        assert audit["rules_version"] == "2.0"
+        assert audit["age_cohort"] == "young_adult"
 
     def test_missing_section_appears_in_audit(self):
         responses = build_missing_section_responses("S3")

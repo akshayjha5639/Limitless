@@ -8,19 +8,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 from app.scoring.engine import (
-    score,
     parse_responses,
     compute_section_averages,
     compute_section_scores,
-    compute_domain_scores,
-    compute_overall_score,
     compute_lifestyle_impacts,
     compute_risk_indicators,
-    compute_strengths,
     normalize_invert,
     SectionScores,
     VALID_AGE_RANGE,
 )
+from app.scoring.scoring_model import score_assessment as score
 from tests.fixtures import (
     FIXTURE_PERFECT,
     FIXTURE_WORST,
@@ -126,104 +123,6 @@ class TestSectionAverages:
         averages, notes = compute_section_averages(parsed)
         assert averages["S1"] is None
 
-
-# ===========================================================================
-# 4. Domain Score Computation
-# ===========================================================================
-
-class TestDomainScores:
-    def _make_section(self, val: float) -> SectionScores:
-        return SectionScores(
-            focus_attention=val,
-            memory_function=val,
-            mental_clarity=val,
-            emotional_wellbeing=val,
-            stress_resilience=val,
-            sleep_recovery=val,
-            productivity_performance=val,
-        )
-
-    def test_processing_speed_clamped_at_95(self):
-        # Mental clarity = 100 → 100 * 0.9 = 90, within clamp
-        s = self._make_section(100.0)
-        d = compute_domain_scores(s)
-        assert d.processing_speed == pytest.approx(90.0)
-
-    def test_processing_speed_clamped_at_40(self):
-        # Mental clarity = 0 → 0 * 0.9 = 0, clamped to 40
-        s = self._make_section(0.0)
-        d = compute_domain_scores(s)
-        assert d.processing_speed == pytest.approx(40.0)
-
-    def test_language_skills_at_70_when_memory_equals_70(self):
-        s = self._make_section(70.0)
-        d = compute_domain_scores(s)
-        assert d.language_skills == pytest.approx(70.0)
-
-    def test_language_skills_delta_capped_at_10(self):
-        # Memory = 100 → delta = 30 → delta*0.5 = 15 → capped at 10 → language = 80
-        s = self._make_section(100.0)
-        d = compute_domain_scores(s)
-        assert d.language_skills == pytest.approx(80.0)
-
-    def test_reaction_time_is_default_70(self):
-        s = self._make_section(80.0)
-        d = compute_domain_scores(s)
-        assert d.reaction_time == 70.0
-
-    def test_executive_function_is_average_of_clarity_and_productivity(self):
-        s = SectionScores(
-            focus_attention=80,
-            memory_function=80,
-            mental_clarity=60.0,
-            emotional_wellbeing=80,
-            stress_resilience=80,
-            sleep_recovery=80,
-            productivity_performance=80.0,
-        )
-        d = compute_domain_scores(s)
-        assert d.executive_function == pytest.approx(70.0)
-
-
-# ===========================================================================
-# 5. Overall Score & Rating Bands
-# ===========================================================================
-
-class TestOverallScore:
-    def _make_domains(self, val: float):
-        from app.scoring.engine import DomainScores
-        return DomainScores(
-            memory=val, attention_focus=val, processing_speed=val,
-            executive_function=val, mental_clarity=val, language_skills=val,
-            problem_solving=val, reaction_time=val,
-        )
-
-    def test_all_100_gives_excellent(self):
-        score, rating = compute_overall_score(self._make_domains(100.0))
-        assert rating == "Excellent"
-        assert score == pytest.approx(100.0)
-
-    def test_all_0_gives_at_risk(self):
-        score, rating = compute_overall_score(self._make_domains(0.0))
-        assert rating == "At Risk"
-
-    def test_score_75_is_good(self):
-        score, rating = compute_overall_score(self._make_domains(75.0))
-        assert rating == "Good"
-
-    def test_score_60_is_needs_attention(self):
-        score, rating = compute_overall_score(self._make_domains(60.0))
-        assert rating == "Needs Attention"
-
-    def test_score_85_is_excellent(self):
-        score, rating = compute_overall_score(self._make_domains(85.0))
-        assert rating == "Excellent"
-
-
-# ===========================================================================
-# 6. Risk Indicators
-# ===========================================================================
-
 class TestRiskIndicators:
     def _section(self, **kwargs) -> SectionScores:
         defaults = dict(
@@ -318,32 +217,6 @@ class TestLifestyleImpacts:
         assert impacts.sleep_quality == "Moderate"
         assert impacts.stress_level == "Moderate"
 
-
-# ===========================================================================
-# 8. Strengths
-# ===========================================================================
-
-class TestStrengths:
-    def test_no_strengths_when_all_below_80(self):
-        from app.scoring.engine import DomainScores
-        d = DomainScores(memory=70, attention_focus=70, processing_speed=70,
-                         executive_function=70, mental_clarity=70,
-                         language_skills=70, problem_solving=70, reaction_time=70)
-        assert compute_strengths(d) == []
-
-    def test_strengths_identified_at_80_and_above(self):
-        from app.scoring.engine import DomainScores
-        d = DomainScores(memory=85, attention_focus=82, processing_speed=70,
-                         executive_function=70, mental_clarity=70,
-                         language_skills=70, problem_solving=70, reaction_time=70)
-        strengths = compute_strengths(d)
-        assert len(strengths) == 2
-
-
-# ===========================================================================
-# 9. Full Pipeline Integration Tests
-# ===========================================================================
-
 class TestFullPipeline:
     def test_perfect_responses_give_excellent(self):
         result = score(22, "male", FIXTURE_PERFECT)
@@ -375,7 +248,7 @@ class TestFullPipeline:
     def test_audit_populated(self):
         result = score(22, "male", FIXTURE_MODERATE)
         assert "rules_version" in result.audit
-        assert result.audit["age_cohort"] == "18-25"
+        assert result.audit["age_cohort"] == "young_adult"
 
     def test_clamping_audit_flag_on_out_of_range(self):
         result = score(22, "male", FIXTURE_OUT_OF_RANGE)
@@ -447,29 +320,29 @@ class TestAgeBands:
 class TestCognitiveAge:
     def test_cognitive_age_none_for_under_43(self):
         result = score(30, "male", FIXTURE_MODERATE)
-        assert result.cognitive_age is None
+        assert result.cognitive_age.estimatedCognitiveAge is None
 
     def test_cognitive_age_none_for_42(self):
         result = score(42, "male", FIXTURE_MODERATE)
-        assert result.cognitive_age is None
+        assert result.cognitive_age.estimatedCognitiveAge is None
 
     def test_cognitive_age_not_none_for_43(self):
         result = score(43, "male", FIXTURE_MODERATE)
-        assert result.cognitive_age is not None
-        assert isinstance(result.cognitive_age, int)
+        assert result.cognitive_age.estimatedCognitiveAge is not None
+        assert isinstance(result.cognitive_age.estimatedCognitiveAge, int)
 
     def test_cognitive_age_clamped_between_18_and_80(self):
         result = score(50, "male", FIXTURE_WORST)
-        assert 18 <= result.cognitive_age <= 80
+        assert 18 <= result.cognitive_age.estimatedCognitiveAge <= 80
 
     def test_cognitive_age_lower_when_score_high(self):
         good   = score(50, "male", FIXTURE_PERFECT)
         bad    = score(50, "male", FIXTURE_WORST)
-        assert good.cognitive_age < bad.cognitive_age
+        assert good.cognitive_age.estimatedCognitiveAge < bad.cognitive_age.estimatedCognitiveAge
 
     def test_cognitive_age_is_int(self):
         result = score(55, "female", FIXTURE_MODERATE)
-        assert isinstance(result.cognitive_age, int)
+        assert isinstance(result.cognitive_age.estimatedCognitiveAge, int)
 class TestNewRiskRules:
     def test_age_related_slowdown_fires_for_56_plus(self):
         # FIXTURE_WORST gives overall < 72

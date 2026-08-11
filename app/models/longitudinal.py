@@ -89,6 +89,6 @@ class LongitudinalResponse(BaseModel):
     predictive_projections_calibrated: dict[str, float]
     contextual_ai_insights: ContextualInsights
     # Phase 5, additive — empty dict / False when not both of the two most
-    # recent sessions are v2 (see longitudinal_engine.compute_reliable_change)
+    # recent sessions carry composite data (see compute_reliable_change)
     reliable_change: dict[str, ReliableChangeEntry] = Field(default_factory=dict)
     retest_interval_warning: bool = False

@@ -30,6 +30,7 @@ defined exactly once (Phase 5).
 from datetime import datetime, timezone
 import math
 
+from app.scoring.scoring_model import SCALE_DISPLAY_NAMES
 from app.services.rci import compute_rci, MIN_RETEST_INTERVAL_DAYS
 
 
@@ -39,35 +40,28 @@ from app.services.rci import compute_rci, MIN_RETEST_INTERVAL_DAYS
 
 # PRD §3.2 — invariant key <- dashboard payload key
 DOMAIN_KEY_MAP = {
-    "memory":            "score_memory",
     "attentionFocus":    "score_attention",
-    "processingSpeed":   "score_processing_speed",
+    "memoryRecall":      "score_memory",
     "executiveFunction": "score_executive_function",
-    "mentalClarity":     "score_clarity",
-    "languageSkills":    "score_language",
-    "problemSolving":    "score_problem_solving",
-    "reactionTime":      "score_reaction_time",
+    "mentalEnergy":      "score_mental_energy",
+    "stressLoad":        "score_stress_load",
+    "sleepRecovery":     "score_sleep_recovery",
+    "lifestyleModule":   "score_lifestyle",
 }
 
 # Short trend keys used in the telemetry payload (PRD §5 example uses
 # "memory", "executive_function" — snake_case without the score_ prefix).
 DOMAIN_TREND_KEY = {
-    "memory":            "memory",
     "attentionFocus":    "attention",
-    "processingSpeed":   "processing_speed",
+    "memoryRecall":      "memory",
     "executiveFunction": "executive_function",
-    "mentalClarity":     "clarity",
-    "languageSkills":    "language",
-    "problemSolving":    "problem_solving",
-    "reactionTime":      "reaction_time",
+    "mentalEnergy":      "mental_energy",
+    "stressLoad":        "stress_load",
+    "sleepRecovery":     "sleep_recovery",
+    "lifestyleModule":   "lifestyle",
 }
 
-DOMAIN_DISPLAY = {
-    "memory": "Memory",              "attentionFocus": "Attention",
-    "processingSpeed": "Processing", "executiveFunction": "Executive function",
-    "mentalClarity": "Mental clarity", "languageSkills": "Language",
-    "problemSolving": "Problem solving", "reactionTime": "Reaction time",
-}
+DOMAIN_DISPLAY = dict(SCALE_DISPLAY_NAMES)
 
 # PRD §3.3 — lifestyle vectors (dashboard key -> invariant key)
 LIFESTYLE_KEY_MAP = {
@@ -91,14 +85,18 @@ IMPACT_TO_WELLNESS = {
 # Attribution pairs (lifestyle invariant key -> domain dashboard key).
 # Mirrors the cross-feature dependencies the product already models in
 # report_mapper.generate_risk_prediction().
+# The anxiety pair previously targeted "mentalClarity", which was the same
+# underlying section this model reports as Executive Function. It now targets
+# Mental Energy, the nearest independently-measured scale, and the output key
+# is renamed to match what is actually being measured.
 ATTRIBUTION_PAIRS = [
-    ("lifestyle_sleep",   "memory",            "sleep_to_memory_coefficient"),
+    ("lifestyle_sleep",   "memoryRecall",      "sleep_to_memory_coefficient"),
     ("lifestyle_stress",  "attentionFocus",    "stress_to_attention_coefficient"),
     ("lifestyle_burnout", "executiveFunction", "burnout_to_executive_coefficient"),
-    ("lifestyle_anxiety", "mentalClarity",     "anxiety_to_clarity_coefficient"),
+    ("lifestyle_anxiety", "mentalEnergy",      "anxiety_to_energy_coefficient"),
 ]
 
-# Mirrors app.scoring.engine_v2's provisional composite SD/alpha (kept as
+# Mirrors app.scoring.scoring_model's provisional composite SD/alpha (kept as
 # local literals rather than an import, per this module's stdlib-only
 # design). Used as a proxy SEM for "overall" reliable-change, since v2 does
 # not define a dedicated overall-score SEM.
@@ -195,7 +193,7 @@ def normalize_session(record: dict) -> dict:
           "_dt": datetime (internal, for sorting/velocity),
           "chronological_age": int,
           "overall_score": float,
-          "score_memory": float, ... (8 invariant domain keys),
+          "score_memory": float, ... (7 invariant scale keys),
           "lifestyle_sleep": float, ... (4 invariant lifestyle keys),
         }
 
@@ -232,6 +230,8 @@ def normalize_session(record: dict) -> dict:
 
     for dash_key, invariant_key in DOMAIN_KEY_MAP.items():
         val = domains.get(dash_key)
+        if isinstance(val, dict):          # scale object: {score, sem, ciLow, ciHigh}
+            val = val.get("score")
         if val is None:
             raise ValueError(f"analysis.domains is missing '{dash_key}'")
         out[invariant_key] = _clamp(float(val))
@@ -244,12 +244,12 @@ def normalize_session(record: dict) -> dict:
         else:                                       # categorical tag
             out[invariant_key] = IMPACT_TO_WELLNESS.get(str(raw), 50.0)
 
-    # Phase 5 (RCI): v2 composite score + SEM, when this session is a v2
-    # /analyze response. None for v1 sessions or malformed composite data —
-    # compute_reliable_change() gates on this rather than fabricating it.
+    # RCI input: composite score + SEM. None for sessions stored before
+    # composites existed, or for malformed data — compute_reliable_change()
+    # gates on this rather than fabricating it.
     out["composites"] = None
     composites_raw = analysis.get("composites")
-    if analysis.get("modelVersion") == "v2" and isinstance(composites_raw, dict):
+    if isinstance(composites_raw, dict):
         try:
             out["composites"] = {
                 "cognitiveComplaintIndex": {

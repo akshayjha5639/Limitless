@@ -2,32 +2,16 @@
 from datetime import datetime
 from app.scoring.engine import get_age_band
 from app.core.config import settings
-from app.scoring.engine_v2 import SCALE_WEIGHTS
+from app.scoring.scoring_model import SCALE_WEIGHTS, SCALE_DISPLAY_NAMES
 
 # ============================================================
-# v2 additive helpers (Phase 4) — report_mapper computes,
-# pdf_service.py only draws. None of this changes any existing
-# key in the dict returned by transform_analysis_to_report(); it
-# only adds new keys that are empty/None when v2 data is absent,
-# so v1 (or v2 with a flag off) output is unaffected.
+# report_mapper computes; pdf_service.py only draws. Keys whose
+# feature flag is off come through empty/None rather than absent,
+# so the drawing code can rely on the shape.
 # ============================================================
 
-V2_SCALE_DISPLAY_NAMES = {
-    "attentionFocus":    "Attention & Focus",
-    "memoryRecall":       "Memory & Recall",
-    "executiveFunction":  "Executive Function",
-    "mentalEnergy":       "Mental Energy",
-    "stressLoad":         "Stress & Emotional Load",
-    "sleepRecovery":      "Sleep & Recovery",
-    "lifestyleModule":    "Lifestyle Module",
-}
-
-_LEGACY_DOMAIN_DISPLAY = {
-    "memory": "Memory", "attentionFocus": "Attention",
-    "processingSpeed": "Processing", "executiveFunction": "Executive",
-    "mentalClarity": "Clarity", "languageSkills": "Language",
-    "problemSolving": "Problem Solving", "reactionTime": "Reaction Time",
-}
+# Display names come from the scoring model itself so the report, the radar
+# chart and the API response can never disagree about the scale set or order.
 
 _COMPOSITE_DISPLAY = {
     "cognitiveComplaintIndex": "Cognitive Complaint Index",
@@ -39,25 +23,14 @@ _COMPOSITE_DISPLAY = {
 # Concept -> label resolution.
 #
 # The narrative generators (root causes, risk prediction, projections) refer to
-# cognitive concepts by name. Those names differ between the two vocabularies,
-# so each generator takes a label map instead of hardcoding strings. v1 keeps
-# the exact legacy labels, which is what makes v1 output byte-identical.
-#
-# Under v2, "clarity" resolves to Executive Function: v1's Mental Clarity was
-# the S3 section, which v2 reports as Executive Function. "processing" maps to
-# Mental Energy — v1's Processing Speed was a fabricated Mental Clarity x 0.9
-# proxy, so Mental Energy is the nearest scale that measures anything real.
+# cognitive concepts by name, so each takes a label map instead of hardcoding
+# strings. Two concepts are aliases of a single scale: "clarity" was the S3
+# section, which is reported as Executive Function, and "processing" resolves
+# to Mental Energy — the nearest scale that measures anything the old
+# Processing Speed proxy claimed to.
 # ---------------------------------------------------------------------------
 
-CONCEPT_LABELS_V1 = {
-    "memory":     "Memory",
-    "attention":  "Attention",
-    "executive":  "Executive",
-    "clarity":    "Clarity",
-    "processing": "Processing",
-}
-
-CONCEPT_LABELS_V2 = {
+CONCEPT_LABELS = {
     "memory":     "Memory & Recall",
     "attention":  "Attention & Focus",
     "executive":  "Executive Function",
@@ -65,12 +38,12 @@ CONCEPT_LABELS_V2 = {
     "processing": "Mental Energy",
 }
 
-# Score-breakdown weights per vocabulary (v2 mirrors engine_v2.SCALE_WEIGHTS)
-V2_BREAKDOWN_WEIGHTS = {
-    V2_SCALE_DISPLAY_NAMES[k]: w for k, w in SCALE_WEIGHTS.items()
+# Score-breakdown weights (mirrors scoring_model.SCALE_WEIGHTS)
+BREAKDOWN_WEIGHTS = {
+    SCALE_DISPLAY_NAMES[k]: w for k, w in SCALE_WEIGHTS.items()
 }
 
-V2_STRENGTH_BADGES = {
+STRENGTH_BADGES_BY_SCALE = {
     "Attention & Focus":       {"badge": "Focused Mind",         "icon": "🔍"},
     "Memory & Recall":         {"badge": "Sharp Memory",         "icon": "🧠"},
     "Executive Function":      {"badge": "Strategic Thinker",    "icon": "♟"},
@@ -80,7 +53,7 @@ V2_STRENGTH_BADGES = {
     "Lifestyle Module":        {"badge": "Strong Daily Habits",  "icon": "🌱"},
 }
 
-V2_STRENGTH_DESCRIPTIONS = {
+STRENGTH_DESCRIPTIONS_BY_SCALE = {
     "Attention & Focus":
         "Sustained attention holds up well against distraction during demanding tasks.",
     "Memory & Recall":
@@ -98,54 +71,46 @@ V2_STRENGTH_DESCRIPTIONS = {
 }
 
 
-def _v2_radar_and_confidence(analysis: dict, domains: dict) -> tuple[dict, dict]:
-    """Item 1 (radar) + item 2 (scale bars) source data.
+def _radar_and_confidence(scales: dict) -> tuple[dict, dict]:
+    """Radar chart + scale bar source data.
 
-    radar_domains: label -> score. 7 real v2 scales when v2 is active,
-    otherwise the same legacy 8-domain dict already used today (so the
-    radar chart / brain performance bars render identically when v1).
-
-    scale_confidence: label -> {sem, ciLow, ciHigh}. Only populated when
-    v2 is active AND ENABLE_CONFIDENCE_INTERVALS is on — empty otherwise,
-    which is what keeps the scale-bar drawing unchanged by default.
+    radar_domains:    display label -> score.
+    scale_confidence: display label -> {sem, ciLow, ciHigh}. Populated only
+                      when ENABLE_CONFIDENCE_INTERVALS is on; empty otherwise,
+                      which makes the scale bars render without ranges.
     """
-    scales = analysis.get("scales")
-    if analysis.get("modelVersion") != "v2" or not scales:
-        return domains, {}
-
     radar_domains = {
-        V2_SCALE_DISPLAY_NAMES[k]: scales[k]["score"] for k in V2_SCALE_DISPLAY_NAMES
+        SCALE_DISPLAY_NAMES[k]: scales[k]["score"] for k in SCALE_DISPLAY_NAMES
     }
 
     scale_confidence = {}
     if settings.ENABLE_CONFIDENCE_INTERVALS:
         scale_confidence = {
-            V2_SCALE_DISPLAY_NAMES[k]: {
+            SCALE_DISPLAY_NAMES[k]: {
                 "sem": scales[k]["sem"], "ciLow": scales[k]["ciLow"], "ciHigh": scales[k]["ciHigh"],
             }
-            for k in V2_SCALE_DISPLAY_NAMES
+            for k in SCALE_DISPLAY_NAMES
         }
 
     return radar_domains, scale_confidence
 
 
 def _cognitive_age_range(analysis: dict) -> dict | None:
-    """Item 3 — Cognitive Age page range + provisional footnote."""
-    cog_v2 = analysis.get("cognitiveAgeV2")
-    if not cog_v2 or cog_v2.get("ageLow") is None or cog_v2.get("ageHigh") is None:
+    """Cognitive Age page range + provisional footnote."""
+    cog = analysis.get("cognitiveAge") or {}
+    if cog.get("ageLow") is None or cog.get("ageHigh") is None:
         return None
     return {
-        "low":  cog_v2["ageLow"],
-        "high": cog_v2["ageHigh"],
-        "disclaimer": cog_v2.get("disclaimer", ""),
+        "low":  cog["ageLow"],
+        "high": cog["ageHigh"],
+        "disclaimer": cog.get("disclaimer", ""),
     }
 
 
 def _progress_table(analysis: dict) -> dict | None:
-    """Item 4 — Progress page data. Only built when Phase 5's reliable-change
-    data is actually present (two-point RCI requires v2 + SEM on both the
-    current and prior report) — the PDF only ever adds the new page when
-    there is real reliable-change data to show, never speculatively."""
+    """Progress page data. Built only when reliable-change data is actually
+    present (two-point RCI needs composites + SEM on both the current and the
+    prior report), so the page is never added speculatively."""
     reliable_change = analysis.get("reliableChange")
     if not reliable_change:
         return None
@@ -153,12 +118,12 @@ def _progress_table(analysis: dict) -> dict | None:
     deltas = (analysis.get("progress") or {}).get("deltas") or []
     domain_rows = [
         {
-            "domain":      _LEGACY_DOMAIN_DISPLAY.get(d["domain"], d["domain"]),
+            "domain":      SCALE_DISPLAY_NAMES.get(d["domain"], d["domain"]),
             "previous":    d["previous"],
             "current":     d["current"],
             "delta":       d["delta"],
-            # 4-item scales are noisy — only the 12-item composites/overall
-            # below get a formal reliable-change verdict (see Phase 5 note).
+            # 4-item scales are noisy — only the 12-item composites and the
+            # overall score below get a formal reliable-change verdict.
             "reliability": "Directional only",
         }
         for d in deltas
@@ -192,51 +157,37 @@ SCALE_DESCRIPTIONS = {
 }
 
 
-def _methodology(analysis: dict) -> dict | None:
-    """Optional methodology page (Phase 4) source data — v2 only."""
-    if analysis.get("modelVersion") != "v2":
-        return None
+def _methodology(analysis: dict) -> dict:
+    """Optional methodology page source data."""
     return {
         "item_bank_version": settings.ITEM_BANK_VERSION,
         "scales": [
             {
-                "name":        V2_SCALE_DISPLAY_NAMES[k],
+                "name":        SCALE_DISPLAY_NAMES[k],
                 "description": SCALE_DESCRIPTIONS[k],
                 "weight_pct":  round(SCALE_WEIGHTS[k] * 100),
             }
-            for k in V2_SCALE_DISPLAY_NAMES
+            for k in SCALE_DISPLAY_NAMES
         ],
     }
 
 
 def transform_analysis_to_report(analysis: dict) -> dict:
 
-    domains = {
-        "Memory": analysis["domains"]["memory"],
-        "Attention": analysis["domains"]["attentionFocus"],
-        "Processing": analysis["domains"]["processingSpeed"],
-        "Executive": analysis["domains"]["executiveFunction"],
-        "Clarity": analysis["domains"]["mentalClarity"],
-        "Language": analysis["domains"]["languageSkills"],
-        "Problem Solving": analysis["domains"]["problemSolving"],
-        "Reaction Time": analysis["domains"]["reactionTime"],
-    }
+    # `domains` in the response holds the seven measured scales, each a
+    # {score, sem, ciLow, ciHigh} object.
+    scales = analysis["domains"]
 
-    radar_domains, scale_confidence = _v2_radar_and_confidence(analysis, domains)
+    radar_domains, scale_confidence = _radar_and_confidence(scales)
     validity_status     = (analysis.get("validity") or {}).get("status")
     cognitive_age_range = _cognitive_age_range(analysis)
     progress_table       = _progress_table(analysis)
     methodology          = _methodology(analysis)
 
-    # `active` is the vocabulary the whole report narrates: the 7 real v2
-    # scales when v2 is on, otherwise the legacy 8 domains. Under v1
-    # _v2_radar_and_confidence returns the `domains` dict itself, so every
-    # downstream generator receives exactly what it received before and v1
-    # output stays byte-identical.
-    is_v2   = analysis.get("modelVersion") == "v2"
+    # The vocabulary the whole report narrates: display label -> score.
     active  = radar_domains
-    labels  = CONCEPT_LABELS_V2 if is_v2 else CONCEPT_LABELS_V1
-    weights = V2_BREAKDOWN_WEIGHTS if is_v2 else None
+    labels  = CONCEPT_LABELS
+    weights = BREAKDOWN_WEIGHTS
 
     # ============================================================
     # Helpers
@@ -290,18 +241,6 @@ def transform_analysis_to_report(analysis: dict) -> dict:
     # ============================================================
     # Top strengths
     # ============================================================
-    STRENGTH_BADGES = {
-    "Reaction Time":   {"badge": "Fast Thinker",              "icon": "⚡"},
-    "Language":        {"badge": "Strong Verbal Processing",   "icon": "📚"},
-    "Problem Solving": {"badge": "Above-Avg Problem Solver",   "icon": "🎯"},
-    "Memory":          {"badge": "Sharp Memory",               "icon": "🧠"},
-    "Attention":       {"badge": "Focused Mind",               "icon": "🔍"},
-    "Executive":       {"badge": "Strategic Thinker",          "icon": "♟"},
-    "Processing":      {"badge": "Quick Processor",            "icon": "⚙"},
-    "Clarity":         {"badge": "Clear Thinker",              "icon": "💡"},
-    }
-    if is_v2:
-        STRENGTH_BADGES = V2_STRENGTH_BADGES
 
     sorted_domains = sorted(
         active.items(),
@@ -312,7 +251,7 @@ def transform_analysis_to_report(analysis: dict) -> dict:
     strengths = []
 
     for name, score in sorted_domains[:3]:
-        badge_info = STRENGTH_BADGES.get(name, {"badge": name, "icon": "★"})
+        badge_info = STRENGTH_BADGES_BY_SCALE.get(name, {"badge": name, "icon": "★"})
         strengths.append({
             "title":       name,
             "score":       score,
@@ -415,7 +354,9 @@ def transform_analysis_to_report(analysis: dict) -> dict:
                 datetime.now().strftime("%d %B %Y"),
         },
 
-        "domains": domains,
+        # Same seven-scale dict as radar_domains; kept under the historical
+        # key so page renderers that read data["domains"] keep working.
+        "domains": active,
 
         "score_breakdown": generate_score_breakdown(active, weights),
         "traffic_light":   generate_traffic_light(active),
@@ -449,7 +390,6 @@ def transform_analysis_to_report(analysis: dict) -> dict:
 
         # --- v2 additive keys (Phase 4) — all None/empty unless v2 data is
         # present, so v1 output (and v2 with flags off) is unaffected ---
-        "model_version":       analysis.get("modelVersion", "v1"),
         "radar_domains":      radar_domains,
         "scale_confidence":   scale_confidence,
         "validity_status":    validity_status,
@@ -615,7 +555,7 @@ def generate_risk_prediction(
 ) -> dict:
 
     # labels=None keeps the legacy v1 vocabulary, so v1 output is unchanged.
-    L = labels or CONCEPT_LABELS_V1
+    L = labels or CONCEPT_LABELS
     NAME_MEMORY     = L["memory"]
     NAME_ATTENTION  = L["attention"]
     NAME_EXECUTIVE  = L["executive"]
@@ -884,7 +824,7 @@ def generate_strength_description(name):
     # v2 scale names fall through to the v2 table; unknown names to the default.
     return descriptions.get(
         name,
-        V2_STRENGTH_DESCRIPTIONS.get(
+        STRENGTH_DESCRIPTIONS_BY_SCALE.get(
             name,
             "Performance in this domain remains stable."
         )
@@ -906,7 +846,7 @@ def generate_projection(domains,age,labels=None):
     # labels=None keeps the legacy v1 vocabulary, so v1 output is unchanged.
     # dict.fromkeys de-duplicates while preserving order: under v2 "clarity"
     # and "executive" both resolve to Executive Function.
-    L = labels or CONCEPT_LABELS_V1
+    L = labels or CONCEPT_LABELS
     target_domains = list(dict.fromkeys([
         L["memory"],
         L["attention"],
@@ -938,7 +878,7 @@ def generate_projection(domains,age,labels=None):
 def generate_root_causes(lifestyle: dict, domains: dict, labels: dict | None = None) -> list:
 
     # labels=None keeps the legacy v1 vocabulary, so v1 output is unchanged.
-    L = labels or CONCEPT_LABELS_V1
+    L = labels or CONCEPT_LABELS
     candidates = []
 
     # Lifestyle-based causes

@@ -60,11 +60,11 @@ BORDER_COLOR   = HexColor("#E2E8F0")
 SURFACE        = HexColor("#F8FAFC")
 
 # Display truncation for narrow chart axes (radar spokes, distribution bars).
-# Long v2 scale names would otherwise overrun their allotted width.
+# Long scale names would otherwise overrun their allotted width.
 SHORT_LABELS = {
-    # v1 legacy domains
+    # retired domain labels, kept so old stored reports still render
     "Problem Solving": "Problem", "Reaction Time": "Reaction",
-    # v2 scales
+    # current scales
     "Attention & Focus": "Attention", "Memory & Recall": "Memory",
     "Executive Function": "Executive", "Mental Energy": "Energy",
     "Stress & Emotional Load": "Stress", "Sleep & Recovery": "Sleep",
@@ -658,9 +658,7 @@ def draw_cover_page(c, data):
     c.roundRect(MARGIN, PAGE_HEIGHT - 780, PAGE_WIDTH - MARGIN * 2, 72, 14, fill=1, stroke=0)
 
     insights_text = [
-        (str(len(_active)),
-         "Cognitive Scales Analyzed" if data.get("model_version") == "v2"
-         else "Cognitive Domains Analyzed"),
+        (str(len(_active)), "Cognitive Scales Analyzed"),
         ("4", "Lifestyle Factors Assessed"),
         ("30", "Day Improvement Plan"),
         ("AI", "Powered Insights"),
@@ -980,12 +978,11 @@ def draw_executive_summary(c, data):
 
 def draw_brain_analysis(c, data):
 
-    _n = len(data.get("radar_domains") or data["domains"])
-    _unit = "scales" if data.get("model_version") == "v2" else "cognitive domains"
+    _n = len(data["radar_domains"])
     draw_page_header(
         c,
         "Core Brain Function Analysis",
-        f"Detailed assessment across {_n} {_unit}",
+        f"Detailed assessment across {_n} scales",
         3
     )
 
@@ -1851,17 +1848,15 @@ def draw_strengths_page(c, data):
         draw_tag(c, MARGIN + 56, sy - card_h + 6,
                  score_status(strength["score"]), rc, height=13, radius=5)
 
-    # Strength distribution bar chart — active vocabulary (7 v2 scales / 8 legacy)
-    _is_v2      = data.get("model_version") == "v2"
-    all_domains = data.get("radar_domains") or data["domains"]
+    # Strength distribution bar chart across all seven scales
+    all_domains = data["radar_domains"]
     chart_y     = content_top - 74 - len(strengths) * (card_h + gap) - 16
     chart_h     = 148
 
     if chart_y - chart_h > 44:
         draw_card(c, MARGIN, chart_y - chart_h,
                   PAGE_WIDTH - MARGIN * 2, chart_h, radius=14)
-        draw_text(c, "Strength Distribution — All Scales"
-                  if data.get("model_version") == "v2" else "Strength Distribution — All Domains",
+        draw_text(c, "Strength Distribution — All Scales",
                   MARGIN + 14, chart_y - 18, 11, FONT_BOLD)
         draw_divider(c, MARGIN + 14, chart_y - 28,
                      PAGE_WIDTH - MARGIN * 2 - 28)
@@ -1887,7 +1882,7 @@ def draw_strengths_page(c, data):
 
             # Domain label below. v2 scale names are truncated (bars are only
             # ~70pt wide); v1 labels are left exactly as they were.
-            label = SHORT_LABELS.get(dname, dname) if _is_v2 else dname
+            label = SHORT_LABELS.get(dname, dname)
             c.setFont(FONT, 6)
             c.setFillColor(TEXT_SECONDARY)
             c.drawCentredString(bx + bar_item_w / 2,
@@ -2692,10 +2687,14 @@ def _draw_score_gauge(c, cx, cy, radius, score):
     c.setLineWidth(track_w)
     c.arc(cx - radius, cy - radius, cx + radius, cy + radius, 0, 180)
  
-    # Value arc: start at the left (180) and sweep clockwise by score%
-    c.setStrokeColor(score_color(score))
-    c.setLineWidth(track_w)
-    c.arc(cx - radius, cy - radius, cx + radius, cy + radius, 180, -180 * score / 100.0)
+    # Value arc: start at the left (180) and sweep clockwise by score%.
+    # A zero-extent arc divides by zero inside ReportLab's bezierArc, so a
+    # score of 0 draws the empty track only.
+    extent = -180 * score / 100.0
+    if abs(extent) > 0.01:
+        c.setStrokeColor(score_color(score))
+        c.setLineWidth(track_w)
+        c.arc(cx - radius, cy - radius, cx + radius, cy + radius, 180, extent)
     c.restoreState()
  
     # Centre value, sitting in the mouth of the arc
@@ -2723,10 +2722,9 @@ def draw_teaser_report(c, data):
     # v2: 7 real scales replace the 8 legacy domains (3 of which were
     # fabricated). Both fall back to today's exact values under v1, so the
     # v1 teaser renders byte-identically.
-    radar_source = data.get("radar_domains") or data["domains"]
+    radar_source = data["radar_domains"]
     traffic      = data["traffic_light"]
-    axis_label   = f"{len(radar_source)} Scales" if data.get("model_version") == "v2" \
-                   else f"{len(radar_source)} Domains"
+    axis_label   = f"{len(radar_source)} Scales"
  
     inner_w = PAGE_WIDTH - 2 * MARGIN          # 515pt
     GAP     = 13

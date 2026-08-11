@@ -78,9 +78,9 @@ class TestNormalization:
         analysis = _get_analysis(FIXTURE_MODERATE)
         s = normalize_session({"sessionTimestamp": "2026-07-01T00:00:00Z",
                                "analysis": analysis})
-        for key in ["score_memory", "score_attention", "score_processing_speed",
-                    "score_executive_function", "score_clarity", "score_language",
-                    "score_problem_solving", "score_reaction_time"]:
+        for key in ["score_memory", "score_attention", "score_executive_function",
+                    "score_mental_energy", "score_stress_load",
+                    "score_sleep_recovery", "score_lifestyle"]:
             assert key in s
             assert 0.0 <= s[key] <= 100.0
 
@@ -140,7 +140,7 @@ class TestVelocityAndTrends:
     def test_domain_trends_carry_full_history(self):
         h = _history_from_fixtures([FIXTURE_WORST, FIXTURE_MODERATE, FIXTURE_PERFECT])
         trends = run_longitudinal_analysis(h)["longitudinal_telemetry"]["domain_trends"]
-        assert len(trends) == 8
+        assert len(trends) == 7
         for t in trends.values():
             assert len(t["historical_values"]) == 3
             assert t["status"] in {

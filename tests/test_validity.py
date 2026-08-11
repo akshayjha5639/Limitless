@@ -2,8 +2,8 @@
 Unit tests for v2 response validity checks (Phase 6).
 Run: python -m pytest tests/test_validity.py -v
 
-Covers app.scoring.engine_v2.check_response_validity in isolation, plus a
-couple of score_v2() integration checks. Does not modify any existing
+Covers app.scoring.scoring_model.check_response_validity in isolation, plus a
+couple of score_assessment() integration checks. Does not modify any existing
 test file.
 """
 
@@ -11,7 +11,7 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.scoring.engine import parse_responses
-from app.scoring.engine_v2 import check_response_validity, score_v2
+from app.scoring.scoring_model import check_response_validity, score_assessment
 from tests.fixtures import FIXTURE_PERFECT, FIXTURE_WORST, FIXTURE_MODERATE
 
 
@@ -144,23 +144,23 @@ class TestValidityStatusThresholds:
 
 
 # ===========================================================================
-# 6. score_v2() integration — validity surfaces correctly on the full result
+# 6. score_assessment() integration — validity surfaces correctly on the full result
 # ===========================================================================
 
 class TestScoreV2ValidityIntegration:
     def test_valid_varied_responses_end_to_end(self):
-        result = score_v2(age=30, gender="male", responses=FIXTURE_MODERATE)
+        result = score_assessment(age=30, gender="male", responses=FIXTURE_MODERATE)
         assert result.validity.status == "Valid"
         assert result.validity.flags == []
 
     def test_straight_lined_responses_end_to_end(self):
-        result = score_v2(age=30, gender="male", responses=FIXTURE_PERFECT)
+        result = score_assessment(age=30, gender="male", responses=FIXTURE_PERFECT)
         assert result.validity.status in ("Review", "Low confidence")
         assert len(result.validity.flags) >= 1
 
     def test_speed_floor_and_reverse_inconsistency_combine_to_low_confidence(self):
         values = [0, 0, 0, 0] + [1] * 24
-        result = score_v2(
+        result = score_assessment(
             age=30, gender="male", responses=_responses(values),
             elapsed_seconds=45, reverse_item_ids=["S1_Q4"],
         )

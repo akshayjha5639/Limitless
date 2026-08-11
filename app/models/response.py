@@ -40,15 +40,33 @@ class OverallScore(BaseModel):
     rating: RatingBand
 
 
+class ScaleScore(BaseModel):
+    """One scored scale: the point estimate plus its measurement error.
+
+    ciLow/ciHigh are the 95% confidence interval (score +/- 1.96 * sem).
+    """
+    score:  float = Field(..., ge=0, le=100)
+    sem:    float = Field(..., ge=0)
+    ciLow:  float = Field(..., ge=0, le=100)
+    ciHigh: float = Field(..., ge=0, le=100)
+
+
 class DomainScores(BaseModel):
-    memory:             float = Field(..., ge=0, le=100)
-    attentionFocus:     float = Field(..., ge=0, le=100)
-    processingSpeed:    float = Field(..., ge=0, le=100)
-    executiveFunction:  float = Field(..., ge=0, le=100)
-    mentalClarity:      float = Field(..., ge=0, le=100)
-    languageSkills:     float = Field(..., ge=0, le=100)
-    problemSolving:     float = Field(..., ge=0, le=100)
-    reactionTime:       float = Field(..., ge=0, le=100)
+    """The seven measured scales.
+
+    These are the only scales the questionnaire supports. An earlier revision
+    reported eight domains, four of which (processingSpeed, mentalClarity,
+    languageSkills, problemSolving, reactionTime) could not be measured by
+    self-report and were derived from the others; they have been removed
+    rather than reported as if they were measured.
+    """
+    attentionFocus:     ScaleScore
+    memoryRecall:       ScaleScore
+    executiveFunction:  ScaleScore
+    mentalEnergy:       ScaleScore
+    stressLoad:         ScaleScore
+    sleepRecovery:      ScaleScore
+    lifestyleModule:    ScaleScore
 
 
 class LifestyleImpacts(BaseModel):
@@ -59,35 +77,22 @@ class LifestyleImpacts(BaseModel):
 
 
 class CognitiveAge(BaseModel):
+    """Cognitive-age estimate with its uncertainty range.
+
+    estimatedCognitiveAge / ageLow / ageHigh are None below
+    COGNITIVE_AGE_MIN_AGE — render nothing rather than a null.
+    """
     actualAge:              int
     estimatedCognitiveAge:  Optional[int] = Field(
         default=None,
-        description="Estimated age according the performation on the assessment."
+        description="Estimated age according to performance on the assessment."
     )
-    disclaimer: str = Field(
-        default="Motivational wellness metric only — not a clinical measurement."
+    ageLow:                 Optional[int] = None
+    ageHigh:                Optional[int] = None
+    provisional:            bool = True
+    disclaimer:             str = Field(
+        default="Provisional wellness index — not a clinical measure of brain age."
     )
-
-
-# ---------------------------------------------------------------------------
-# v2 scoring model — additive sub-models (v1 models above are untouched)
-# ---------------------------------------------------------------------------
-
-class ScaleScore(BaseModel):
-    score:  float = Field(..., ge=0, le=100)
-    sem:    float = Field(..., ge=0)
-    ciLow:  float = Field(..., ge=0, le=100)
-    ciHigh: float = Field(..., ge=0, le=100)
-
-
-class ScalesV2(BaseModel):
-    attentionFocus:     ScaleScore
-    memoryRecall:        ScaleScore
-    executiveFunction:   ScaleScore
-    mentalEnergy:        ScaleScore
-    stressLoad:          ScaleScore
-    sleepRecovery:       ScaleScore
-    lifestyleModule:     ScaleScore
 
 
 class Composites(BaseModel):
@@ -100,18 +105,7 @@ class ValidityReport(BaseModel):
     flags:  list[str] = Field(default_factory=list)
 
 
-class CognitiveAgeV2(BaseModel):
-    actualAge:              int
-    estimatedCognitiveAge:  Optional[int] = None
-    ageLow:                 Optional[int] = None
-    ageHigh:                Optional[int] = None
-    provisional:            bool = True
-    disclaimer:             str = Field(
-        default="Provisional wellness index — not a clinical measure of brain age."
-    )
-
-
-class PercentileV2(BaseModel):
+class Percentile(BaseModel):
     value:       Optional[int] = None
     provisional: bool = True
 
@@ -202,17 +196,13 @@ class AnalyzeResponse(BaseModel):
     disclaimers:        list[str]       = Field(default=MANDATORY_DISCLAIMERS)
     privacy:            PrivacyInfo     = Field(default_factory=PrivacyInfo)
 
-    # --- v2 scoring model — additive, optional, default None so v1 responses
-    #     are byte-for-byte unchanged when SCORING_MODEL_VERSION="v1" ---
-    scales:          Optional[ScalesV2]      = None
-    composites:      Optional[Composites]    = None
-    validity:        Optional[ValidityReport] = None
-    percentile:      Optional[PercentileV2]  = None
-    cognitiveAgeV2:  Optional[CognitiveAgeV2] = None
-    modelVersion:    str = "v1"
+    composites:      Composites
+    validity:        ValidityReport
+    percentile:      Percentile
 
-    # --- Phase 5, additive — two-point RCI vs priorReport (v2-only, feeds
-    #     the PDF Progress page); None/False unless both reports are v2 ---
+    # --- Two-point RCI vs priorReport (feeds the PDF Progress page).
+    #     None/False unless ENABLE_RELIABLE_CHANGE is on and a usable
+    #     priorReport was supplied. ---
     reliableChange:        Optional[ReliableChange] = None
     retestIntervalWarning: bool = False
 

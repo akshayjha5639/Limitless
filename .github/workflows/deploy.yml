@@ -21,24 +21,16 @@ jobs:
             git fetch origin
             git reset --hard origin/main
 
-            # Pin production to the v2 scoring model with every feature flag on.
-            # app/core/config.py deliberately keeps v1-safe defaults (they are a
-            # library default and a tested regression guard), so the live
-            # configuration is declared here instead. This rewrites only these
-            # five keys and preserves everything else in .env, notably
-            # GEMINI_API_KEY. Idempotent: safe to run on every deploy.
+            # Clear any stale flag overrides so production runs on the code
+            # defaults (all reporting features on). Rewrites only these keys
+            # and preserves everything else in .env, notably GEMINI_API_KEY.
+            # Idempotent: safe to run on every deploy.
             grep -vE '^(SCORING_MODEL_VERSION|ENABLE_CONFIDENCE_INTERVALS|ENABLE_VALIDITY_CHECKS|ENABLE_RELIABLE_CHANGE|ENABLE_METHODOLOGY_PAGE)=' .env > .env.new 2>/dev/null || true
-            printf '%s\n' \
-              'SCORING_MODEL_VERSION=v2' \
-              'ENABLE_CONFIDENCE_INTERVALS=true' \
-              'ENABLE_VALIDITY_CHECKS=true' \
-              'ENABLE_RELIABLE_CHANGE=true' \
-              'ENABLE_METHODOLOGY_PAGE=true' >> .env.new
             mv .env.new .env
             chmod 600 .env
 
             venv/bin/pip install -r requirements.txt
             sudo systemctl restart limitless-model
 
-            # Fail the deploy loudly if production did not come up on v2.
-            venv/bin/python -c "from app.core.config import settings as s; assert s.SCORING_MODEL_VERSION == 'v2' and s.ENABLE_CONFIDENCE_INTERVALS and s.ENABLE_VALIDITY_CHECKS and s.ENABLE_RELIABLE_CHANGE and s.ENABLE_METHODOLOGY_PAGE; print('live config OK: v2, all flags enabled')"
+            # Fail the deploy loudly if a reporting feature came up disabled.
+            venv/bin/python -c "from app.core.config import settings as s; assert s.ENABLE_CONFIDENCE_INTERVALS and s.ENABLE_VALIDITY_CHECKS and s.ENABLE_RELIABLE_CHANGE and s.ENABLE_METHODOLOGY_PAGE; print('live config OK: all reporting features enabled')"

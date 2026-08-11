@@ -1,5 +1,5 @@
 """
-Unit + integration tests for the v2 scoring engine (Phase 6).
+Unit + integration tests for the scoring model.
 Run: python -m pytest tests/test_engine_v2.py -v
 
 Does not modify any existing test file. Response-validity-specific tests
@@ -14,8 +14,7 @@ from starlette.testclient import TestClient
 
 from app.main import app
 from app.core.config import settings
-from app.scoring.engine import score as run_scoring_v1
-from app.scoring.engine_v2 import score_v2, SCALE_WEIGHTS, COGNITIVE_AGE_MIN_AGE
+from app.scoring.scoring_model import SCALE_DISPLAY_NAMES, score_assessment, SCALE_WEIGHTS, COGNITIVE_AGE_MIN_AGE
 from app.services.rci import compute_rci, RCI_THRESHOLD
 from tests.fixtures import (
     FIXTURE_PERFECT,
@@ -40,36 +39,55 @@ def _payload(responses, age=50, gender="female", assessment_id="v2-test", elapse
 
 
 # ===========================================================================
-# 1. v1 regression guard — default config must produce v1-shaped output,
-#    identical to a direct call of the untouched v1 engine.
+# 1. Single-model guard — there is one scoring model and `domains` is it.
 # ===========================================================================
 
-class TestV1RegressionGuard:
-    def test_default_scoring_model_version_is_v1(self):
-        assert settings.SCORING_MODEL_VERSION == "v1"
+SCALE_KEYS = {
+    "attentionFocus", "memoryRecall", "executiveFunction", "mentalEnergy",
+    "stressLoad", "sleepRecovery", "lifestyleModule",
+}
 
-    def test_v1_route_output_unaffected_by_v2_fields(self):
+# The eight-domain vocabulary that used to live in `domains`, four of which
+# were derived rather than measured. None of it may come back.
+RETIRED_DOMAIN_KEYS = {
+    "memory", "processingSpeed", "mentalClarity",
+    "languageSkills", "problemSolving", "reactionTime",
+}
+
+
+class TestSingleModel:
+    def test_domains_holds_exactly_the_seven_scales(self):
         r = client.post(ANALYZE_URL, json=_payload(FIXTURE_MODERATE, age=30))
         assert r.status_code == 200
+        domains = r.json()["domains"]
+
+        assert set(domains) == SCALE_KEYS
+        assert not set(domains) & RETIRED_DOMAIN_KEYS
+
+    def test_every_domain_entry_carries_its_confidence_interval(self):
+        r = client.post(ANALYZE_URL, json=_payload(FIXTURE_MODERATE, age=30))
+        for key, entry in r.json()["domains"].items():
+            assert set(entry) == {"score", "sem", "ciLow", "ciHigh"}, key
+
+    def test_no_model_version_field_is_advertised(self):
+        r = client.post(ANALYZE_URL, json=_payload(FIXTURE_MODERATE, age=30))
         body = r.json()
+        assert "modelVersion" not in body
+        assert "scales" not in body
+        assert "cognitiveAgeV2" not in body
 
-        assert body["modelVersion"] == "v1"
-        assert body["scales"] is None
-        assert body["composites"] is None
-        assert body["validity"] is None
-        assert body["percentile"] is None
-        assert body["cognitiveAgeV2"] is None
-        assert body["reliableChange"] is None
-        assert body["retestIntervalWarning"] is False
-
-    def test_v1_route_output_matches_direct_engine_call(self):
-        r = client.post(ANALYZE_URL, json=_payload(FIXTURE_BURNOUT, age=45, gender="male"))
+    def test_scoring_features_are_always_present(self):
+        r = client.post(ANALYZE_URL, json=_payload(FIXTURE_MODERATE, age=30))
         body = r.json()
+        for key in ("composites", "validity", "percentile", "cognitiveAge"):
+            assert body[key] is not None, key
 
-        direct = run_scoring_v1(age=45, gender="male", responses=FIXTURE_BURNOUT)
-        assert body["overall"]["score"] == direct.overall_score
-        assert body["overall"]["rating"] == direct.rating
-        assert body["domains"]["reactionTime"] == direct.domain_scores.reaction_time
+    def test_radar_chart_uses_the_seven_scale_labels(self):
+        r = client.post(ANALYZE_URL, json=_payload(FIXTURE_MODERATE, age=30))
+        radar = r.json()["charts"]["radarDomains"]
+        assert len(radar["labels"]) == 7
+        assert "Reaction Time" not in radar["labels"]
+        assert "Sleep & Recovery" in radar["labels"]
 
 
 # ===========================================================================
@@ -79,7 +97,7 @@ class TestV1RegressionGuard:
 class TestSevenScales:
     @pytest.mark.parametrize("fixture", [FIXTURE_PERFECT, FIXTURE_WORST, FIXTURE_MODERATE, FIXTURE_BURNOUT])
     def test_exactly_seven_scales_all_in_range(self, fixture):
-        result = score_v2(age=50, gender="female", responses=fixture)
+        result = score_assessment(age=50, gender="female", responses=fixture)
         scale_dict = vars(result.scales)
         assert len(scale_dict) == 7
         for v in scale_dict.values():
@@ -96,7 +114,7 @@ class TestSevenScales:
 class TestComposites:
     @pytest.mark.parametrize("fixture", [FIXTURE_MODERATE, FIXTURE_BURNOUT])
     def test_composites_equal_mean_of_constituent_scales(self, fixture):
-        result = score_v2(age=50, gender="female", responses=fixture)
+        result = score_assessment(age=50, gender="female", responses=fixture)
         s = vars(result.scales)
         c = vars(result.composites)
 
@@ -117,7 +135,7 @@ class TestComposites:
 class TestConfidenceIntervals:
     @pytest.mark.parametrize("fixture", [FIXTURE_PERFECT, FIXTURE_WORST, FIXTURE_MODERATE, FIXTURE_BURNOUT])
     def test_ci_ordered_and_clamped(self, fixture):
-        result = score_v2(age=45, gender="male", responses=fixture)
+        result = score_assessment(age=45, gender="male", responses=fixture)
         for v in vars(result.scales).values():
             assert 0 <= v.ciLow <= v.score <= v.ciHigh <= 100
         for v in vars(result.composites).values():
@@ -128,15 +146,15 @@ class TestConfidenceIntervals:
 # 5. Cognitive age — None below 43, integer + range at 43+
 # ===========================================================================
 
-class TestCognitiveAgeV2:
+class TestCognitiveAge:
     def test_none_below_min_age(self):
-        result = score_v2(age=COGNITIVE_AGE_MIN_AGE - 1, gender="male", responses=FIXTURE_MODERATE)
+        result = score_assessment(age=COGNITIVE_AGE_MIN_AGE - 1, gender="male", responses=FIXTURE_MODERATE)
         assert result.cognitive_age.estimatedCognitiveAge is None
         assert result.cognitive_age.ageLow is None
         assert result.cognitive_age.ageHigh is None
 
     def test_integer_with_range_at_min_age_and_above(self):
-        result = score_v2(age=COGNITIVE_AGE_MIN_AGE, gender="male", responses=FIXTURE_MODERATE)
+        result = score_assessment(age=COGNITIVE_AGE_MIN_AGE, gender="male", responses=FIXTURE_MODERATE)
         cog = result.cognitive_age
         assert isinstance(cog.estimatedCognitiveAge, int)
         assert isinstance(cog.ageLow, int) and isinstance(cog.ageHigh, int)
@@ -145,7 +163,7 @@ class TestCognitiveAgeV2:
         assert cog.disclaimer
 
     def test_clamped_to_18_80(self):
-        result = score_v2(age=66, gender="male", responses=FIXTURE_WORST)
+        result = score_assessment(age=66, gender="male", responses=FIXTURE_WORST)
         assert 18 <= result.cognitive_age.estimatedCognitiveAge <= 80
 
 
@@ -153,12 +171,12 @@ class TestCognitiveAgeV2:
 # 6. Percentile stays within 1-99
 # ===========================================================================
 
-class TestPercentileV2:
+class TestPercentile:
     @pytest.mark.parametrize("age,fixture", [
         (66, FIXTURE_PERFECT), (18, FIXTURE_WORST), (50, FIXTURE_MODERATE),
     ])
     def test_percentile_within_1_99(self, age, fixture):
-        result = score_v2(age=age, gender="male", responses=fixture)
+        result = score_assessment(age=age, gender="male", responses=fixture)
         assert 1 <= result.percentile.value <= 99
         assert result.percentile.provisional is True
 
@@ -184,7 +202,6 @@ class TestReliableChangeIndex:
         assert out["flag"] == "Reliable decline"
 
     def test_analyze_route_reliable_change_end_to_end(self, monkeypatch):
-        monkeypatch.setattr(settings, "SCORING_MODEL_VERSION", "v2")
         monkeypatch.setattr(settings, "ENABLE_RELIABLE_CHANGE", True)
 
         r1 = client.post(ANALYZE_URL, json=_payload(FIXTURE_WORST))
@@ -195,9 +212,8 @@ class TestReliableChangeIndex:
         assert body["reliableChange"] is not None
         assert body["reliableChange"]["overall"]["flag"] == "Reliable improvement"
 
-    def test_analyze_route_reliable_change_off_by_default(self, monkeypatch):
-        monkeypatch.setattr(settings, "SCORING_MODEL_VERSION", "v2")
-        # ENABLE_RELIABLE_CHANGE left at its default (False)
+    def test_analyze_route_reliable_change_suppressed_when_flag_off(self, monkeypatch):
+        monkeypatch.setattr(settings, "ENABLE_RELIABLE_CHANGE", False)
 
         r1 = client.post(ANALYZE_URL, json=_payload(FIXTURE_WORST))
         prior = r1.json()
@@ -208,12 +224,11 @@ class TestReliableChangeIndex:
 
 
 # ===========================================================================
-# 8. PDF generation — v2 active, every flag on / every flag off
+# 8. PDF generation — every flag on / every flag off
 # ===========================================================================
 
-class TestPDFGenerationV2:
-    def test_pdf_generates_with_v2_and_every_flag_on(self, monkeypatch):
-        monkeypatch.setattr(settings, "SCORING_MODEL_VERSION", "v2")
+class TestPDFGeneration:
+    def test_pdf_generates_with_every_flag_on(self, monkeypatch):
         monkeypatch.setattr(settings, "ENABLE_CONFIDENCE_INTERVALS", True)
         monkeypatch.setattr(settings, "ENABLE_VALIDITY_CHECKS", True)
         monkeypatch.setattr(settings, "ENABLE_RELIABLE_CHANGE", True)
@@ -226,14 +241,12 @@ class TestPDFGenerationV2:
         r2 = client.post(ANALYZE_URL, json=_payload(FIXTURE_MODERATE, elapsed=300, prior=prior))
         assert r2.status_code == 200
         analysis = r2.json()
-        assert analysis["modelVersion"] == "v2"
 
         pdf = client.post(PDF_URL, json={"analysis": analysis})
         assert pdf.status_code == 200
         assert len(pdf.content) > 0
 
-    def test_teaser_pdf_uses_seven_v2_scales(self, monkeypatch):
-        monkeypatch.setattr(settings, "SCORING_MODEL_VERSION", "v2")
+    def test_teaser_pdf_uses_seven_scales(self, monkeypatch):
 
         r = client.post(ANALYZE_URL, json=_payload(FIXTURE_MODERATE))
         analysis = r.json()
@@ -252,10 +265,9 @@ class TestPDFGenerationV2:
         assert pdf.status_code == 200
         assert len(pdf.content) > 0
 
-    def test_full_report_narrative_migrated_to_v2_scales(self, monkeypatch):
+    def test_full_report_narrative_uses_scales(self, monkeypatch):
         """Every narrative generator must speak the v2 vocabulary, not the
         legacy 8 domains (3 of which were fabricated)."""
-        monkeypatch.setattr(settings, "SCORING_MODEL_VERSION", "v2")
 
         r = client.post(ANALYZE_URL, json=_payload(FIXTURE_MODERATE))
         from app.services.report_mapper import transform_analysis_to_report
@@ -284,23 +296,6 @@ class TestPDFGenerationV2:
         for dropped in ("Reaction Time", "Problem Solving", "Language", "Processing"):
             assert dropped not in scale_names
 
-    def test_teaser_pdf_unchanged_under_v1(self):
-        r = client.post(ANALYZE_URL, json=_payload(FIXTURE_MODERATE, age=22, gender="male"))
-        analysis = r.json()
-        assert analysis["modelVersion"] == "v1"
-
-        from app.services.report_mapper import transform_analysis_to_report
-        data = transform_analysis_to_report(analysis)
-
-        # v1 still drives the teaser off the legacy 8 domains
-        assert data["radar_domains"] == data["domains"]
-        assert len(data["radar_domains"]) == 8
-        # legacy vocabulary intact — the fabricated domains still appear under v1
-        assert "Reaction Time" in data["radar_domains"]
-        assert {row["domain"] for row in data["score_breakdown"]} == set(data["domains"])
-
-        pdf = client.post("/api/v1/generate-teaser-pdf", json={"analysis": analysis})
-        assert pdf.status_code == 200
 
     def test_benchmarks_expose_both_cohort_averages(self):
         """The report compares against both cohorts rather than picking one
@@ -330,8 +325,7 @@ class TestPDFGenerationV2:
             assert neutral["peer_average"] != female["peer_average"]
             assert neutral["cohort_label"] == "All genders"
 
-    def test_pdf_generates_with_v2_and_every_flag_off(self, monkeypatch):
-        monkeypatch.setattr(settings, "SCORING_MODEL_VERSION", "v2")
+    def test_pdf_generates_with_every_flag_off(self, monkeypatch):
         monkeypatch.setattr(settings, "ENABLE_CONFIDENCE_INTERVALS", False)
         monkeypatch.setattr(settings, "ENABLE_VALIDITY_CHECKS", False)
         monkeypatch.setattr(settings, "ENABLE_RELIABLE_CHANGE", False)
@@ -340,8 +334,53 @@ class TestPDFGenerationV2:
         r = client.post(ANALYZE_URL, json=_payload(FIXTURE_MODERATE))
         assert r.status_code == 200
         analysis = r.json()
-        assert analysis["modelVersion"] == "v2"
 
         pdf = client.post(PDF_URL, json={"analysis": analysis})
         assert pdf.status_code == 200
         assert len(pdf.content) > 0
+
+
+# ===========================================================================
+# 9. Zero-score guard
+# ===========================================================================
+
+class TestZeroScoreRendering:
+    """A floor score used to divide by zero inside ReportLab's bezierArc.
+
+    Both gauges draw an arc whose extent is proportional to the score, so a
+    0 produces a zero-extent arc. Guarded in _draw_score_gauge and the
+    cognitive-age ring; these pin it for both documents.
+    """
+
+    def test_zero_overall_score_is_reachable(self):
+        r = client.post(ANALYZE_URL, json=_payload(FIXTURE_WORST, age=60))
+        assert r.json()["overall"]["score"] == 0.0
+
+    @pytest.mark.parametrize("url", [PDF_URL, "/api/v1/generate-teaser-pdf"])
+    def test_zero_score_renders_without_crashing(self, url):
+        analysis = client.post(ANALYZE_URL, json=_payload(FIXTURE_WORST, age=60)).json()
+        pdf = client.post(url, json={"analysis": analysis})
+        assert pdf.status_code == 200
+        assert len(pdf.content) > 1000
+
+
+class TestProgressPageLabels:
+    def test_progress_rows_use_scale_display_names(self):
+        """Delta rows are keyed by scale, so they must resolve through the
+        scale display names — not the retired domain labels, which would
+        leave most rows showing a raw camelCase key."""
+        from app.services.report_mapper import transform_analysis_to_report
+
+        base = _payload(FIXTURE_WORST, age=47)
+        prior = client.post(ANALYZE_URL, json=base).json()
+        current = client.post(
+            ANALYZE_URL, json=_payload(FIXTURE_PERFECT, age=47, prior=prior)
+        ).json()
+
+        rows = transform_analysis_to_report(current)["progress_table"]["domain_rows"]
+        labels = [r["domain"] for r in rows]
+
+        assert labels, "expected delta rows"
+        for label in labels:
+            assert label in SCALE_DISPLAY_NAMES.values(), label
+            assert " " in label, f"raw key leaked through: {label}"

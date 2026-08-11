@@ -1,14 +1,20 @@
 """
 Limitless Cognitive Wellness Platform
-Scoring Engine — v1.0
+Shared scoring primitives.
 
-Pipeline: Raw responses (0–4) → Section averages → Normalize (0–100) → Invert → Domain scores → Overall score
+Response parsing, section averaging, normalise/invert, age banding, the
+lifestyle-impact and risk-indicator rule engines, and the dataclasses those
+rules are keyed on. The scales, composites and everything reported to the
+user are computed in scoring_model.py, which builds on these.
 
+DomainScores is an internal rule-engine input, not a reported structure --
+app/services/recommendations.py keys several of its rules on fields such as
+processing_speed, so the shape is retained and fed from the nearest real
+scale. Nothing in it reaches the API response.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
-from enum import Enum
 
 
 VALID_AGE_RANGE = (18, 66) 
@@ -58,21 +64,6 @@ SECTION_IDS = ["S1", "S2", "S3", "S4", "S5", "S6", "S7"]
 ITEMS_PER_SECTION = 4
 RESPONSE_MIN, RESPONSE_MAX = 0, 4
 
-# Domain weights (must sum to 1.0)
-DOMAIN_WEIGHTS = {
-    "memory":            0.20,
-    "attention_focus":   0.20,
-    "processing_speed":  0.15,
-    "executive_function":0.15,
-    "mental_clarity":    0.10,
-    "language_skills":   0.05,
-    "problem_solving":   0.05,
-    "reaction_time":     0.05,
-    # Note: remaining 0.05 from reaction_time brings total to 0.95;
-    # doc weights sum to 1.0 — reaction_time carries the remainder
-}
-
-# Rating bands
 RATING_BANDS = [
     (85, 100, "Excellent"),
     (70,  84, "Good"),
@@ -158,24 +149,6 @@ class LifestyleImpacts:
     anxiety_load:   str
     burnout_risk:   str
 
-
-@dataclass
-class ScoringResult:
-    overall_score:      float
-    rating:             str
-    section_scores:     SectionScores
-    domain_scores:      DomainScores
-    lifestyle_impacts:  LifestyleImpacts
-    risk_indicators:    list[str]
-    strengths:          list[str]
-    cognitive_age:      Optional[int]
-    audit:              dict = field(default_factory=dict)
-
-
-# ---------------------------------------------------------------------------
-# Step 1 — Parse & validate responses
-# ---------------------------------------------------------------------------
-
 def parse_responses(responses: list[dict]) -> dict[str, int]:
     """
     Input:  [{"itemId": "S1_Q1", "value": 2}, ...]
@@ -257,83 +230,6 @@ def compute_section_scores(averages: dict[str, Optional[float]]) -> SectionScore
         productivity_performance=score("S7"),
     )
 
-
-# ---------------------------------------------------------------------------
-# Step 4 — Domain scores from section scores
-# ---------------------------------------------------------------------------
-
-def compute_domain_scores(s: SectionScores) -> DomainScores:
-    """
-    Maps section scores → 8 cognitive domain scores per spec.
-    Proxy domains use clamping and delta logic as documented.
-    """
-    memory           = s.memory_function
-    attention_focus  = s.focus_attention
-    mental_clarity   = s.mental_clarity
-
-    # Processing Speed: proxy from Mental Clarity, clamped [40, 95]
-    processing_speed = max(40.0, min(95.0, mental_clarity * 0.9))
-
-    # Executive Function: composite of Mental Clarity + Productivity, decision-item weighted
-    executive_function = round((mental_clarity + s.productivity_performance) / 2, 2)
-
-    # Language Skills: proxy from memory recall items, ±10 delta from base 70
-    memory_delta = memory - 70
-    language_skills = round(max(0, min(100, 70 + max(-10, min(10, memory_delta * 0.5)))), 2)
-
-    # Problem Solving: proxy from decision/overwhelm items in S3, ±10 delta from base 70
-    clarity_delta = mental_clarity - 70
-    problem_solving = round(max(0, min(100, 70 + max(-10, min(10, clarity_delta * 0.5)))), 2)
-
-    # Reaction Time: default 70 (future subtest placeholder)
-    reaction_time = 70.0
-
-    return DomainScores(
-        memory=             round(memory, 2),
-        attention_focus=    round(attention_focus, 2),
-        processing_speed=   round(processing_speed, 2),
-        executive_function= round(executive_function, 2),
-        mental_clarity=     round(mental_clarity, 2),
-        language_skills=    language_skills,
-        problem_solving=    problem_solving,
-        reaction_time=      reaction_time,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Step 5 — Overall weighted score & rating band
-# ---------------------------------------------------------------------------
-
-def compute_overall_score(d: DomainScores) -> tuple[float, str]:
-    domain_dict = {
-        "memory":             d.memory,
-        "attention_focus":    d.attention_focus,
-        "processing_speed":   d.processing_speed,
-        "executive_function": d.executive_function,
-        "mental_clarity":     d.mental_clarity,
-        "language_skills":    d.language_skills,
-        "problem_solving":    d.problem_solving,
-        "reaction_time":      d.reaction_time,
-    }
-
-    # Normalize weights in case they don't exactly sum to 1.0
-    total_weight = sum(DOMAIN_WEIGHTS.values())
-    overall = sum(domain_dict[k] * (w / total_weight) for k, w in DOMAIN_WEIGHTS.items())
-    overall = round(overall, 2)
-
-    rating = "At Risk"
-    for low, high, label in RATING_BANDS:
-        if low <= overall <= high:
-            rating = label
-            break
-
-    return overall, rating
-
-
-# ---------------------------------------------------------------------------
-# Step 6 — Lifestyle impact factors
-# ---------------------------------------------------------------------------
-
 def compute_lifestyle_impacts(s: SectionScores) -> LifestyleImpacts:
     return LifestyleImpacts(
         sleep_quality= _impact_label(s.sleep_recovery),
@@ -362,152 +258,3 @@ def compute_risk_indicators(s: SectionScores, d: DomainScores, age: int,overall_
     }
     return [label for label, condition in RISK_RULES if condition(scores, age)]
 
-# ---------------------------------------------------------------------------
-# Cognitive Age Heuristic
-# ---------------------------------------------------------------------------
-
-def compute_cognitive_age(
-    age: int,
-    overall_score: float,
-    sleep_score: float,
-    stress_score: float,
-) -> Optional[int]:
-    """
-    Estimates cognitive age based on overall score, sleep, and stress.
-    Returns None for bands below 43 — not meaningful for younger cohorts.
-    
-    Formula (from spec):
-      base     = actual age
-      score δ  = −1 year per +3 pts above 70 / +1 year per −3 pts below 70
-      sleep δ  = ±1–2 years based on sleep quality
-      stress δ = ±1–2 years based on stress level
-      result   = clamp(base + all deltas, 18, 80)
-    """
-    if age < 43:
-        return None
-
-    estimated = float(age)
-
-    # --- Score delta ---
-    score_delta = overall_score - 70
-    estimated -= score_delta / 3   # +3 pts above 70 = −1 yr; −3 pts below 70 = +1 yr
-
-    # --- Sleep modifier ---
-    if sleep_score < 50:
-        estimated += 2
-    elif sleep_score < 70:
-        estimated += 1
-    elif sleep_score >= 85:
-        estimated -= 1
-
-    # --- Stress modifier ---
-    if stress_score < 50:
-        estimated += 2
-    elif stress_score < 70:
-        estimated += 1
-    elif stress_score >= 85:
-        estimated -= 1
-
-    # --- Clamp to realistic range ---
-    return int(round(max(18, min(80, estimated))))
-# ---------------------------------------------------------------------------
-# Step 8 — Strengths (domains >= 80)
-# ---------------------------------------------------------------------------
-
-DOMAIN_LABELS = {
-    "memory":             "Memory retention",
-    "attention_focus":    "Attention & focus",
-    "processing_speed":   "Processing speed",
-    "executive_function": "Executive function",
-    "mental_clarity":     "Mental clarity",
-    "language_skills":    "Language skills",
-    "problem_solving":    "Problem solving",
-    "reaction_time":      "Reaction time",
-}
-
-def compute_strengths(d: DomainScores) -> list[str]:
-    domain_dict = vars(d)
-    return [
-        DOMAIN_LABELS[k]
-        for k, v in domain_dict.items()
-        if isinstance(v, (int, float)) and v >= 80
-    ]
-
-
-# ---------------------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------------------
-
-def score(age: int, gender: str, responses: list[dict]) -> ScoringResult:
-    """
-    Full scoring pipeline.
-
-    Args:
-        age:       User age (must be 18–25 for Phase 1)
-        gender:    "female" | "male" | "other" | "prefer-not-to-say"
-        responses: List of {"itemId": str, "value": int} dicts (28 items)
-
-    Returns:
-        ScoringResult dataclass with all computed fields
-    """
-    # Validate age for Phase 1 cohort
-    if not (VALID_AGE_RANGE[0] <= age <= VALID_AGE_RANGE[1]):
-        raise ValueError(
-            f"Age {age} is outside Phase 1 scope ({VALID_AGE_RANGE[0]}–{VALID_AGE_RANGE[1]}). "
-            "Expand VALID_AGE_RANGE when moving to all age groups."
-        )
-
-    audit = {}
-
-    # Step 1 — parse & clamp
-    parsed, clamp_flags = parse_responses(responses)
-    if clamp_flags:
-        audit["clamped_values"] = clamp_flags
-
-    # Step 2 — section averages with imputation
-    averages, imputation_notes = compute_section_averages(parsed)
-    if imputation_notes:
-        audit["imputation_notes"] = imputation_notes
-
-    insufficient = [sid for sid, avg in averages.items() if avg is None]
-    if insufficient:
-        audit["insufficient_sections"] = insufficient
-
-    # Step 3 — section scores
-    section_scores = compute_section_scores(averages)
-
-    # Step 4 — domain scores
-    domain_scores = compute_domain_scores(section_scores)
-
-    # Step 5 — overall score + rating
-    overall_score, rating = compute_overall_score(domain_scores)
-    
-    cognitive_age = compute_cognitive_age(
-    age=age,
-    overall_score=overall_score,
-    sleep_score=section_scores.sleep_recovery,
-    stress_score=section_scores.stress_resilience,
-)
-    # Step 6 — lifestyle impacts
-    lifestyle_impacts = compute_lifestyle_impacts(section_scores)
-
-    # Step 7 — risk indicators
-    risk_indicators = compute_risk_indicators(section_scores, domain_scores, age,overall_score)
-
-    # Step 8 — strengths
-    strengths = compute_strengths(domain_scores)
-
-    audit["rules_version"] = "1.0"
-    audit["age_cohort"] = "18-25"
-
-    return ScoringResult(
-        overall_score=overall_score,
-        rating=rating,
-        section_scores=section_scores,
-        domain_scores=domain_scores,
-        lifestyle_impacts=lifestyle_impacts,
-        risk_indicators=risk_indicators,
-        strengths=strengths,
-        cognitive_age=cognitive_age,
-        audit=audit,
-    )
