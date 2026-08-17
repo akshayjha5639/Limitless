@@ -426,9 +426,7 @@ def draw_page_footer(c, report_id=None):
     c.drawCentredString(PAGE_WIDTH / 2, 11,
                         "AI-Powered Cognitive Wellness Assessment — Not a clinical diagnostic tool")
 
-    if report_id:
-        c.drawRightString(PAGE_WIDTH - MARGIN, 11, f"ID: {report_id}")
-
+    
 
 # ============================================================
 # PAGE 1 — PREMIUM COVER
