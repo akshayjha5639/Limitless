@@ -61,6 +61,6 @@ async def generate_questions_route(payload: GenerateQuestionsRequest):
             "version":      "1.0",
             "createdAt":    datetime.now(timezone.utc).isoformat(),
             "aiGenerated":  is_ai,
-            "model":        "gemini-2.0-flash" if is_ai else "static-fallback",
+            "model":        "gemini-3.1-flash-lite" if is_ai else "static-fallback",
         },
     }
