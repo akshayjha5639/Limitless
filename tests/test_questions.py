@@ -157,7 +157,7 @@ class TestAIMetadata:
         with patch("app.api.routes.questions.generate_questions", side_effect=_mock_ai):
             meta = client.post(ENDPOINT, json=VALID_PAYLOAD).json()["metadata"]
         assert meta["aiGenerated"] is True
-        assert meta["model"] == "gemini-2.0-flash"
+        assert meta["model"] == "gemini-3.1-flash-lite"
 
 
 # ===========================================================================
