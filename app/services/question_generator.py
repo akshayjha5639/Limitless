@@ -29,7 +29,13 @@ GEMINI_MAX_DELAY_S = 4.0
 
 # Per-attempt ceiling. The call previously had no timeout at all, so a hung
 # Gemini request could pin a uvicorn worker indefinitely.
-GEMINI_TIMEOUT_MS = 12_000
+#
+# Read timeouts consume retries just like 503s do (verified against a hanging
+# server), so this value sets the worst case a user waits before dropping to
+# static questions: 3 x timeout + ~2.5s of backoff, i.e. roughly 32s at 10s.
+# Lower it if that is too long; raise it if the journal starts showing read
+# timeouts on calls that would otherwise have succeeded.
+GEMINI_TIMEOUT_MS = 10_000
 
 
 def _get_client() -> genai.Client:
@@ -252,10 +258,22 @@ def _parse_and_validate(raw: str) -> list[dict]:
     # Strip markdown fences if Gemini wraps in ```json ... ```
     cleaned = re.sub(r"```(?:json)?\s*|\s*```", "", raw).strip()
 
+    # raw_decode() takes the first complete JSON value and ignores anything
+    # after it, where json.loads() fails outright with "Extra data". Gemini
+    # intermittently appends a second object or stray prose past the end of an
+    # otherwise valid payload, which is not worth discarding a good question
+    # set over.
     try:
-        data = json.loads(cleaned)
+        data, end = json.JSONDecoder().raw_decode(cleaned)
     except json.JSONDecodeError as e:
         raise ValueError(f"Gemini returned invalid JSON: {e}\nRaw: {raw[:300]}")
+
+    trailing = cleaned[end:].strip()
+    if trailing:
+        print(
+            f"[question_generator] Ignored {len(trailing)} trailing chars after "
+            f"the JSON payload: {trailing[:120]!r}"
+        )
 
     sections = data.get("sections", [])
 
