@@ -16,11 +16,38 @@ from app.scoring.engine import get_age_band
 # Gemini client
 # ---------------------------------------------------------------------------
 
+# Gemini returns 503 UNAVAILABLE under load ("this model is currently
+# experiencing high demand"), which is transient — a retry a moment later
+# usually succeeds. Without one, every demand spike silently downgrades a user
+# to the static question set. 429/500/504 fail the same way. Anything else
+# (bad key, malformed request) would fail identically on retry, so it is not
+# retried and falls straight through to _static_fallback().
+GEMINI_RETRY_STATUS_CODES = [429, 500, 503, 504]
+GEMINI_MAX_ATTEMPTS = 3          # original request + 2 retries
+GEMINI_INITIAL_DELAY_S = 0.5
+GEMINI_MAX_DELAY_S = 4.0
+
+# Per-attempt ceiling. The call previously had no timeout at all, so a hung
+# Gemini request could pin a uvicorn worker indefinitely.
+GEMINI_TIMEOUT_MS = 12_000
+
+
 def _get_client() -> genai.Client:
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY environment variable is not set.")
-    return genai.Client(api_key=api_key)
+    return genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(
+            timeout=GEMINI_TIMEOUT_MS,
+            retry_options=types.HttpRetryOptions(
+                attempts=GEMINI_MAX_ATTEMPTS,
+                initial_delay=GEMINI_INITIAL_DELAY_S,
+                max_delay=GEMINI_MAX_DELAY_S,
+                http_status_codes=GEMINI_RETRY_STATUS_CODES,
+            ),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -809,5 +836,8 @@ def generate_questions(age: int, gender: str) -> tuple[list[dict], bool]:
 
     except Exception as e:
         # Network error, quota exceeded, parse failure — use fallback
-        print(f"[question_generator] Gemini call failed: {e}. Using static fallback.")
+        print(
+            f"[question_generator] Gemini call failed after up to "
+            f"{GEMINI_MAX_ATTEMPTS} attempt(s): {e}. Using static fallback."
+        )
         return _static_fallback(age, gender), False
