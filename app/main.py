@@ -5,10 +5,12 @@ Limitless — FastAPI Application Entry Point
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.routes.analyze import router as analyze_router
 from app.api.routes.questions import router as questions_router
@@ -48,6 +50,11 @@ logger = logging.getLogger("uvicorn.error")
 
 MAX_ERRORS_LOGGED = 10
 MAX_INPUT_CHARS = 120
+MAX_DETAIL_CHARS = 300
+
+# Routing noise from bots and link probes. Logging these would bury the 422s
+# this module exists to surface.
+UNLOGGED_STATUS_CODES = {404, 405}
 
 # Fields whose value is never written to the log. Everything else is truncated
 # or summarised rather than dumped, since request bodies carry assessment
@@ -102,6 +109,33 @@ async def log_validation_error(
         status_code=422,
         content={"detail": jsonable_encoder(errors)},
     )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def log_http_exception(
+    request: Request, exc: StarletteHTTPException
+) -> Response:
+    """
+    Log 422s (and other errors) that routes raise deliberately.
+
+    /analyze and /longitudinal-analysis both convert a ValueError from their
+    engine into HTTPException(422). Those never become a RequestValidationError,
+    so without this they reach the access log as a bare status code with the
+    engine's message discarded.
+    """
+    if exc.status_code >= 400 and exc.status_code not in UNLOGGED_STATUS_CODES:
+        detail = str(exc.detail)
+        if len(detail) > MAX_DETAIL_CHARS:
+            detail = detail[:MAX_DETAIL_CHARS] + "...(truncated)"
+        logger.warning(
+            "%d %s %s | %s",
+            exc.status_code,
+            request.method,
+            request.url.path,
+            detail,
+        )
+
+    return await http_exception_handler(request, exc)
 
 
 API_PREFIX = "/api/v1"
