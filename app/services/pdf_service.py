@@ -90,6 +90,130 @@ FONT_BOLD = "Helvetica-Bold"
 FONT_OBL  = "Helvetica-Oblique"
 
 # ============================================================
+# LAYOUT SYSTEM
+# ============================================================
+# One spacing scale for the whole report. Sections, cards and text blocks step
+# in multiples of these, so the vertical rhythm stays consistent across pages
+# instead of each page inventing its own gaps.
+
+SPACE_XS = 6
+SPACE_SM = 10
+SPACE_MD = 16
+SPACE_LG = 24
+SPACE_XL = 34
+
+# Gap from a section heading (and its rule) down to the first row of content.
+# Headings previously sat ~20pt above their first line, which read as attached.
+HEADING_GAP = 32
+
+# Minimum breathing room inside a pill, badge or card before its content.
+PAD_XS    = 4
+PAD_TIGHT = 8
+PAD_BOX   = 12
+
+# Helvetica cap height as a fraction of font size. Text is optically centred on
+# its cap height, not on the full em box, so a centred baseline has to be
+# derived rather than guessed.
+CAP_RATIO = 0.717
+
+
+def centered_baseline(box_y, box_h, font_size, cap_ratio=CAP_RATIO):
+    """Baseline that vertically centres cap-height text inside a box.
+
+    Badges previously hardcoded a baseline offset that ignored both the box
+    height and the font size, so labels drifted toward an edge whenever either
+    changed. Deriving it keeps every pill centred by construction.
+    """
+    return box_y + (box_h - font_size * cap_ratio) / 2.0
+
+
+def text_center_y(baseline_y, font_size, cap_ratio=CAP_RATIO):
+    """Optical centre of a text line whose baseline is at `baseline_y`.
+
+    Bullets and markers align to this rather than to the baseline itself,
+    which is what made them sit visibly below their text.
+    """
+    return baseline_y + font_size * cap_ratio / 2.0
+
+
+def truncate_to_width(c, text, font, size, max_w, ellipsis="…"):
+    """Trim `text` with an ellipsis until it fits `max_w`."""
+    if c.stringWidth(text, font, size) <= max_w:
+        return text
+    ell_w = c.stringWidth(ellipsis, font, size)
+    out = text
+    while out and c.stringWidth(out, font, size) + ell_w > max_w:
+        out = out[:-1]
+    return (out.rstrip() + ellipsis) if out else ellipsis
+
+
+def draw_text_fit_or_trim(c, text, x, y, font, size, max_w, color=None,
+                          min_size=9.0, align="left"):
+    """Shrink toward `min_size`, then ellipsize whatever still will not fit.
+
+    Used for user-supplied values (names above all) so a long entry degrades
+    gracefully instead of running under the next column.
+    """
+    used = fit_font_size(c, text, font, size, max_w, min_size=min_size)
+    shown = truncate_to_width(c, text, font, used, max_w)
+    c.setFont(font, used)
+    if color is not None:
+        c.setFillColor(color)
+    if align == "center":
+        c.drawCentredString(x, y, shown)
+    elif align == "right":
+        c.drawRightString(x, y, shown)
+    else:
+        c.drawString(x, y, shown)
+    return used
+
+
+def _chord_half_width(r, dy):
+    """Half-width of a circle's horizontal chord at vertical offset `dy`."""
+    dy = abs(dy)
+    if dy >= r:
+        return 0.0
+    return math.sqrt(r * r - dy * dy)
+
+
+def _fit_in_circle(c, text, font, max_size, r, centre_dy, pad=12, min_size=8.0,
+                   step=0.5):
+    """Largest size at which `text` fits the chord it spans inside a circle.
+
+    A circle narrows away from its centre, so text drawn off-centre has far
+    less room than the diameter suggests. The band a line of text occupies
+    depends on its own size, so this walks the size down until the text fits
+    the chord at the *outer* edge of its own band.
+    """
+    size = float(max_size)
+    while size > min_size:
+        half_cap = size * CAP_RATIO / 2.0
+        worst_dy = abs(centre_dy) + half_cap        # narrowest edge of the band
+        avail = 2 * _chord_half_width(r, worst_dy) - pad * 2
+        if avail > 0 and c.stringWidth(text, font, size) <= avail:
+            break
+        size -= step
+    return max(size, min_size)
+
+
+def on_dark(color, min_luminance=0.62):
+    """Lift a palette colour until it reads clearly on the dark cover gradient.
+
+    DANGER (#EF4444) and the other mid-tone status colours carry enough
+    contrast on white cards but go muddy on the deep indigo cover, so scores
+    drawn there are brightened toward white instead of being left unreadable.
+    """
+    lum = 0.299 * color.red + 0.587 * color.green + 0.114 * color.blue
+    if lum >= min_luminance:
+        return color
+    t = (min_luminance - lum) / max(1e-6, 1.0 - lum)
+    return Color(
+        color.red + (1.0 - color.red) * t,
+        color.green + (1.0 - color.green) * t,
+        color.blue + (1.0 - color.blue) * t,
+    )
+
+# ============================================================
 # HELPERS
 # ============================================================
 
@@ -197,14 +321,21 @@ def draw_text(c, text, x, y, size=13, font=FONT, color=TEXT_PRIMARY, align="left
         c.drawString(x, y, text)
 
 
-def draw_tag(c, x, y, label, bg_color, text_color=white, width=None, height=22, radius=8):
-    c.setFont(FONT_BOLD, 9)
-    text_w = c.stringWidth(label, FONT_BOLD, 9)
-    w = width or (text_w + 20)
+def draw_tag(c, x, y, label, bg_color, text_color=white, width=None, height=22,
+             radius=8, font_size=9):
+    """Pill badge with its label optically centred.
+
+    The baseline was previously a fixed y+6.5 regardless of `height` or font
+    size, which pushed labels ("At Risk", "Needs Attention", "Burnout") against
+    the top edge of their container on every card that used a custom height.
+    """
+    c.setFont(FONT_BOLD, font_size)
+    text_w = c.stringWidth(label, FONT_BOLD, font_size)
+    w = width or (text_w + PAD_BOX * 2)
     c.setFillColor(bg_color)
     c.roundRect(x, y, w, height, radius, fill=1, stroke=0)
     c.setFillColor(text_color)
-    c.drawCentredString(x + w / 2, y + 6.5, label)
+    c.drawCentredString(x + w / 2, centered_baseline(y, height, font_size), label)
     return w
 
 
@@ -270,42 +401,49 @@ def draw_large_gauge(c, cx, cy, radius, score):
         c.arc(cx - radius, cy - radius, cx + radius, cy + radius,
               startAng=90, extent=-angle)
 
-    # Center white circle
-    inner_r = radius - 22
+    # Center circle. Widened from radius-22 to radius-16 so the value, the
+    # "/ 100" caption and the status pill each get a chord wide enough to sit
+    # inside with real padding. The arc's inner edge is at radius-9, so this
+    # still clears it.
+    inner_r = radius - 16
     c.setFillColor(Color(1, 1, 1, alpha=0.12))
     c.circle(cx, cy, inner_r, stroke=0, fill=1)
 
-    # Score number — sized to fit the inner circle.
-    # "72" keeps the full 52pt display size; wider values such as "72.35"
-    # shrink just enough to stay clear of the outer gauge ring.
+    # --- Score value -------------------------------------------------------
+    # Sized against the chord the digits actually span, not against the full
+    # diameter. The old code fitted "60.91" to 80% of the *diameter* while
+    # drawing it well above centre, where the circle is far narrower, so wide
+    # values pushed out over the coloured arc.
     score_text = str(score)
-    BASE_SIZE = 52
-    CAP_RATIO = 0.717                      # Helvetica-Bold cap height
-    max_text_w = inner_r * 2 * 0.80        # chord width with padding
-    size = fit_font_size(c, score_text, FONT_BOLD, BASE_SIZE, max_text_w, min_size=20)
-    # Hold the digits' optical centre where the full-size version sits, so
-    # the number stays vertically centred and the hierarchy is unchanged.
-    optical_centre_y = cy + 12 + BASE_SIZE * CAP_RATIO / 2
-    baseline_y = optical_centre_y - size * CAP_RATIO / 2
-    c.setFillColor(white)
-    c.setFont(FONT_BOLD, size)
-    c.drawCentredString(cx, baseline_y, score_text)
+    value_dy = 15                       # optical centre, above the caption
+    size = _fit_in_circle(c, score_text, FONT_BOLD, 46, inner_r,
+                          value_dy, pad=PAD_BOX, min_size=22)
+    c.setFillColor(white)               # white keeps full contrast on the
+    c.setFont(FONT_BOLD, size)          # dark cover gradient at any score
+    c.drawCentredString(cx, cy + value_dy - size * CAP_RATIO / 2, score_text)
 
-    # /100
-    c.setFont(FONT, 14)
+    # --- "/ 100" caption ---------------------------------------------------
+    c.setFont(FONT, 11)
     c.setFillColor(Color(1, 1, 1, alpha=0.7))
-    c.drawCentredString(cx, cy - 10, "/ 100")
+    c.drawCentredString(cx, cy - 12, "/ 100")
 
-    # Status
-    status = score_status(score)
-    col = score_color(score)
-    badge_w = 120
-    badge_h = 26
-    c.setFillColor(col)
-    c.roundRect(cx - badge_w / 2, cy - 48, badge_w, badge_h, 13, fill=1, stroke=0)
-    c.setFillColor(white)
-    c.setFont(FONT_BOLD, 11)
-    c.drawCentredString(cx, cy - 38, status)
+    # --- Status pill -------------------------------------------------------
+    # Fitted to the chord at the band it occupies. This was previously a fixed
+    # 120pt wide pill placed where the circle is only ~58pt across, so "Needs
+    # Attention" spilled out over the gauge arc on both sides.
+    status  = score_status(score)
+    badge_h = 20
+    badge_top_dy = -20
+    badge_bot_dy = badge_top_dy - badge_h
+    avail = 2 * _chord_half_width(inner_r, badge_bot_dy) - PAD_XS * 2
+    badge_font = fit_font_size(c, status, FONT_BOLD, 10,
+                               avail - PAD_TIGHT * 2, min_size=7.5)
+    badge_w = min(avail,
+                  c.stringWidth(status, FONT_BOLD, badge_font) + PAD_TIGHT * 2)
+    draw_tag(c, cx - badge_w / 2, cy + badge_bot_dy, status,
+             score_color(score), white,
+             width=badge_w, height=badge_h, radius=badge_h / 2,
+             font_size=badge_font)
 
 
 # ============================================================
@@ -499,18 +637,21 @@ def draw_cover_page(c, data):
     col3 = ux + 285
     col4 = ux + 390
 
-    for col, key, val in [
+    # Each value is clamped to the gap before the next column's separator, so a
+    # long name shrinks and then ellipsizes instead of running under "AGE".
+    col_edges = [col2, col3, col4, ux + uw]
+    for (col, key, val), edge in zip([
         (col1, "NAME", user["name"]),
         (col2, "AGE", str(user["age"])),
         (col3, "GENDER", user["gender"]),
         (col4, "DATE", user.get("assessment_date", datetime.now().strftime("%d %b %Y"))),
-    ]:
+    ], col_edges):
+        avail = edge - col - SPACE_MD
         c.setFont(FONT, 8)
         c.setFillColor(Color(1, 1, 1, alpha=0.5))
         c.drawString(col, uy + 56, key)
-        c.setFont(FONT_BOLD, 13)
-        c.setFillColor(white)
-        c.drawString(col, uy + 38, val)
+        draw_text_fit_or_trim(c, str(val), col, uy + 38,
+                              FONT_BOLD, 13, avail, color=white, min_size=9)
 
     # Separator lines
     c.setStrokeColor(Color(1, 1, 1, alpha=0.2))
@@ -538,12 +679,16 @@ def draw_cover_page(c, data):
         kx = MARGIN + i * (kpi_w + 4)
         c.setFillColor(Color(1, 1, 1, alpha=0.10))
         c.roundRect(kx, kpi_y, kpi_w, 76, 12, fill=1, stroke=0)
-        c.setStrokeColor(score_color(score))
+        # Status colours are tuned for white cards; on the dark cover gradient
+        # DANGER in particular goes muddy, so both the border and the number
+        # are lifted toward white until they read cleanly.
+        tile_col = on_dark(score_color(score))
+        c.setStrokeColor(tile_col)
         c.setLineWidth(2)
         c.roundRect(kx, kpi_y, kpi_w, 76, 12, fill=0, stroke=1)
 
         # Score
-        c.setFillColor(score_color(score))
+        c.setFillColor(tile_col)
         c.setFont(FONT_BOLD, 26)
         c.drawCentredString(kx + kpi_w / 2, kpi_y + 42, str(score))
 
@@ -712,11 +857,30 @@ def draw_executive_summary(c, data):
     # Key Findings takes the remainder, which keeps the page full for
     # both the 8-domain (v1) and 7-scale (v2) breakdown tables.
     # ------------------------------------------------------------
-    SEC_GAP      = 12
+    SEC_GAP      = SPACE_MD    # one section rhythm for the whole page
     BOTTOM_LIMIT = 44          # 32pt footer + breathing room
     tl_h         = 62
     row1_h       = 150
-    bm_h         = 128
+    # The comparison block was the most cramped section on the page while Key
+    # Findings below it ran mostly empty, so height moves from there to here.
+    bm_h         = 158
+
+    # ------------------------------------------------------------
+    # Page budget. Key Findings is sized to the findings it actually has
+    # instead of swallowing every spare point as dead space at the bottom of
+    # the card; whatever is left over widens the gaps between sections, so the
+    # page breathes evenly rather than stacking tight at the top.
+    # ------------------------------------------------------------
+    KF_ROW_H  = 40
+    _findings = data["executive_summary"]["key_findings"]
+    _kf_rows  = max(1, -(-len(_findings) // 2))
+    kf_h      = HEADING_GAP + SPACE_MD + _kf_rows * KF_ROW_H + SPACE_MD
+
+    _tbl_h    = 18 * (len(data.get("score_breakdown", [])) + 1) + 5
+    _content  = tl_h + row1_h + _tbl_h + bm_h + kf_h
+    _surplus  = (y_start - BOTTOM_LIMIT) - _content - SEC_GAP * 4
+    if _surplus > 0:
+        SEC_GAP = min(SEC_GAP + _surplus / 4, SPACE_XL)
 
     # ============================================================
     # TRAFFIC LIGHT SUMMARY
@@ -911,11 +1075,9 @@ def draw_executive_summary(c, data):
                  f"vs {bm.get('band_label','your age group')}")
 
     pct = bm.get("percentile", 50)
-    c.setFillColor(score_color(pct))
-    c.roundRect(PAGE_WIDTH - MARGIN - 86, bm_y - 34, 72, 24, 8, fill=1, stroke=0)
-    c.setFillColor(white)
-    c.setFont(FONT_BOLD, 10)
-    c.drawCentredString(PAGE_WIDTH - MARGIN - 50, bm_y - 23, f"Top {100 - pct}%")
+    draw_tag(c, PAGE_WIDTH - MARGIN - 86, bm_y - 34, f"Top {100 - pct}%",
+             score_color(pct), white, width=72, height=24, radius=8,
+             font_size=10)
 
     # Both cohort averages are shown side by side rather than picking one by
     # the user's gender. The "Top X%" badge above is still computed against
@@ -926,23 +1088,29 @@ def draw_executive_summary(c, data):
         ("Male Avg",       bm.get("peer_average_male",   0), PRIMARY_LIGHT),
         ("Top 10%",        bm.get("top_10_pct",          0), SUCCESS),
     ]
-    bm_bar_w = PAGE_WIDTH - MARGIN * 2 - 126
-    # Four rows now (both cohort averages); spacing derived from the card so
-    # the last bar keeps a real margin above the card edge.
-    bm_row_gap = (bm_h - 56) / len(bar_labels)
+    bm_bar_w = PAGE_WIDTH - MARGIN * 2 - 132
+    # The first row used to start 12pt under the "Top X%" badge, which made the
+    # whole block read as crowded against it. It now clears the badge by a full
+    # section gap, and the rows share the remaining height evenly.
+    bm_bar_h   = 10
+    bm_first_y = bm_y - 34 - SPACE_LG          # badge bottom, then one gap
+    bm_row_gap = (bm_first_y - (bm_y - bm_h) - SPACE_MD) / max(1, len(bar_labels) - 1)
+    bm_row_gap = min(bm_row_gap, 30)
     for bi, (lbl, val, bcol) in enumerate(bar_labels):
-        by2 = bm_y - 46 - bi * bm_row_gap
-        c.setFont(FONT, 7.5)
+        by2 = bm_first_y - bi * bm_row_gap
+        # Label, bar and value all centre on the same optical line.
+        c.setFont(FONT, 8.5)
         c.setFillColor(TEXT_SECONDARY)
-        c.drawString(MARGIN + 16, by2 + 2, lbl)
+        c.drawString(MARGIN + 16, centered_baseline(by2, bm_bar_h, 8.5), lbl)
         c.setFillColor(BORDER_COLOR)
-        c.roundRect(MARGIN + 96, by2, bm_bar_w, 9, 4, fill=1, stroke=0)
-        fill_w = max(9, (val / 100) * bm_bar_w)
+        c.roundRect(MARGIN + 96, by2, bm_bar_w, bm_bar_h, bm_bar_h / 2, fill=1, stroke=0)
+        fill_w = max(bm_bar_h, (val / 100) * bm_bar_w)
         c.setFillColor(bcol)
-        c.roundRect(MARGIN + 96, by2, fill_w, 9, 4, fill=1, stroke=0)
-        c.setFont(FONT_BOLD, 7.5)
+        c.roundRect(MARGIN + 96, by2, fill_w, bm_bar_h, bm_bar_h / 2, fill=1, stroke=0)
+        c.setFont(FONT_BOLD, 8.5)
         c.setFillColor(bcol)
-        c.drawString(MARGIN + 96 + fill_w + 4, by2 + 1, str(val))
+        c.drawString(MARGIN + 96 + fill_w + SPACE_XS,
+                     centered_baseline(by2, bm_bar_h, 8.5), str(val))
 
     # ============================================================
     # KEY FINDINGS
@@ -950,26 +1118,31 @@ def draw_executive_summary(c, data):
     # Key Findings absorbs the space freed by removing the two bottom cards,
     # and shows as many findings as genuinely fit rather than a fixed 4.
     kf_y = bm_y - bm_h - SEC_GAP
-    kf_h = max(96, (kf_y - BOTTOM_LIMIT))
     draw_card(c, MARGIN, kf_y - kf_h, PAGE_WIDTH - MARGIN * 2, kf_h, radius=14)
-    draw_text(c, "Key Findings", MARGIN + 16, kf_y - 16, 12, FONT_BOLD)
-    draw_divider(c, MARGIN + 16, kf_y - 26, PAGE_WIDTH - MARGIN * 2 - 32)
+    draw_text(c, "Key Findings", MARGIN + 16, kf_y - 18, 12, FONT_BOLD)
+    draw_divider(c, MARGIN + 16, kf_y - 28, PAGE_WIDTH - MARGIN * 2 - 32)
 
-    findings   = data["executive_summary"]["key_findings"]
+    findings   = _findings
     col_w      = (PAGE_WIDTH - MARGIN * 2 - 32) / 2
-    kf_row_h   = 36
-    kf_rows    = max(1, int((kf_h - 46) / kf_row_h))
+    kf_font    = 10
+    kf_row_h   = KF_ROW_H                 # was 36; rows were touching
+    # First bullet clears the heading rule by a full HEADING_GAP instead of the
+    # old 20pt, which made the list read as attached to the header.
+    kf_first_y = kf_y - HEADING_GAP - SPACE_MD
+    kf_rows    = max(1, int((kf_first_y - (kf_y - kf_h) - SPACE_MD) / kf_row_h) + 1)
     for fi, finding in enumerate(findings[:kf_rows * 2]):
         fx = MARGIN + 16 + (fi % 2) * col_w
-        fy = kf_y - 46 - (fi // 2) * kf_row_h
+        fy = kf_first_y - (fi // 2) * kf_row_h
+        # The bullet sits on the optical centre of the first text line. It was
+        # previously pinned 3pt below the baseline, so it floated under the text.
+        bullet_cy = text_center_y(fy, kf_font)
         c.setFillColor(PRIMARY)
-        c.circle(fx + 8, fy + 5, 4, fill=1, stroke=0)
+        c.circle(fx + 8, bullet_cy, 4, fill=1, stroke=0)
         c.setFillColor(white)
-        c.circle(fx + 8, fy + 5, 2, fill=1, stroke=0)
-        c.setFont(FONT, 10)
-        c.setFillColor(TEXT_PRIMARY)
-        wrap_text_in_box(c, finding, fx + 20, fy + 8,
-                         col_w - 40, 10, line_height=12, max_lines=2)
+        c.circle(fx + 8, bullet_cy, 2, fill=1, stroke=0)
+        wrap_text_in_box(c, finding, fx + 22, fy,
+                         col_w - 40, kf_font, line_height=13, max_lines=2,
+                         font=FONT, color=TEXT_PRIMARY)
 # ============================================================
 # PAGE 3 — CORE BRAIN FUNCTION ANALYSIS
 # ============================================================
@@ -1008,10 +1181,13 @@ def draw_brain_analysis(c, data):
     # low enough that its upper labels ("Stress & Emotional Load") clear the
     # "Cognitive Domain Overview" heading instead of colliding with it.
     # ------------------------------------------------------------
-    SEC_GAP     = 16
+    SEC_GAP     = SPACE_MD
     n_rows      = max(1, len(radar_domains))
-    pb_row_gap  = 34
-    pb_card_h   = 62 + n_rows * pb_row_gap + 18
+    pb_row_gap  = 36                       # was 34; rows sat tight together
+    # Header block is heading + subtitle + rule + HEADING_GAP, measured rather
+    # than assumed, so the first bar cannot creep up under the subtitle.
+    PB_HEADER_H = 48 + HEADING_GAP
+    pb_card_h   = (PB_HEADER_H + (n_rows - 1) * pb_row_gap + 14 + SPACE_LG)
     pb_y        = content_bottom + pb_card_h          # top edge of dashboard card
     top_y       = pb_y + SEC_GAP
     top_h       = content_top - top_y
@@ -1067,13 +1243,16 @@ def draw_brain_analysis(c, data):
     draw_card(c, MARGIN, pb_y - pb_card_h,
               PAGE_WIDTH - MARGIN * 2, pb_card_h, radius=16)
 
+    # Heading, then a full line of air before the subtitle. These previously
+    # sat 13pt apart on the baseline (about 6pt of visible gap), so the two
+    # read as a single block.
     draw_text(c, "Brain Performance Dashboard",
-              MARGIN + 16, pb_y - 20, 14, FONT_BOLD)
+              MARGIN + 16, pb_y - 22, 14, FONT_BOLD)
     c.setFont(FONT, 9)
     c.setFillColor(TEXT_MUTED)
-    c.drawString(MARGIN + 16, pb_y - 33,
+    c.drawString(MARGIN + 16, pb_y - 38,
                  "Primary visualization — progress bars show each domain score at a glance")
-    draw_divider(c, MARGIN + 16, pb_y - 40, PAGE_WIDTH - MARGIN * 2 - 32)
+    draw_divider(c, MARGIN + 16, pb_y - 48, PAGE_WIDTH - MARGIN * 2 - 32)
 
     # ---- Row columns -------------------------------------------------
     # Laid out right-to-left from the card edge so every column has a real
@@ -1095,7 +1274,7 @@ def draw_brain_analysis(c, data):
     row_gap      = pb_row_gap
 
     for di, (domain, value) in enumerate(radar_domains.items()):
-        dy = pb_y - 62 - di * row_gap
+        dy = pb_y - PB_HEADER_H - di * row_gap
 
         text_y = dy + (bar_h - 7) / 2
 
@@ -1182,16 +1361,31 @@ def draw_lifestyle_page(c, data):
     }
 
     card_w = (PAGE_WIDTH - MARGIN * 2 - 12) / 2
-    # 138 left only 16pt between the progress bar and the Tip band, so the
-    # description's second line was drawn on top of the coloured Tip band.
-    # Page 4 had ~180pt of unused space below the root-cause card, so the
-    # cards take the height they actually need.
-    card_h = 168
+
+    # ------------------------------------------------------------
+    # Page 4 budget. The card stack was anchored to the top and left ~150pt of
+    # dead space above the footer. Each block is now sized from its content and
+    # the surplus is shared between the two section gaps, so the page fills
+    # evenly instead of trailing off into blank space.
+    # ------------------------------------------------------------
+    BOTTOM_LIMIT = 46
+    root_causes  = data.get("root_causes", [])
+    RC_ROW_H     = 52                       # was 44; rows read as cramped
+    RC_HEADER_H  = 52 + HEADING_GAP
+    # A row's content sits between ry+7 and ry+32, so the card only needs the
+    # last row's anchor plus a bottom pad — not a whole extra row of height.
+    rc_h         = (RC_HEADER_H + max(0, len(root_causes) - 1) * RC_ROW_H
+                    + SPACE_SM)
+    card_h       = 188
+    _surplus     = ((content_top - BOTTOM_LIMIT)
+                    - (card_h * 2 + rc_h) - SPACE_LG * 2)
+    sec_gap4     = min(SPACE_LG + max(0.0, _surplus) / 2, 56)
+
     positions = [
         (MARGIN,               content_top - card_h),
         (MARGIN + card_w + 12, content_top - card_h),
-        (MARGIN,               content_top - card_h * 2 - 14),
-        (MARGIN + card_w + 12, content_top - card_h * 2 - 14),
+        (MARGIN,               content_top - card_h * 2 - sec_gap4),
+        (MARGIN + card_w + 12, content_top - card_h * 2 - sec_gap4),
     ]
 
     for i, (key, val) in enumerate(lifestyle.items()):
@@ -1244,26 +1438,24 @@ def draw_lifestyle_page(c, data):
                          font=FONT, color=TEXT_SECONDARY)
 
     # ── ROOT CAUSE ANALYSIS ──
-    root_causes = data.get("root_causes", [])
-    rc_top = content_top - card_h * 2 - 28
-    rc_h   = 44 + len(root_causes) * 44 + 16
+    rc_top = content_top - card_h * 2 - sec_gap4 * 2
     draw_card(c, MARGIN, rc_top - rc_h, PAGE_WIDTH - MARGIN * 2, rc_h, radius=14)
 
     # Section header
     c.setFillColor(DANGER)
     c.roundRect(MARGIN, rc_top - rc_h, PAGE_WIDTH - MARGIN * 2, rc_h, 14, fill=0, stroke=1)
     c.setLineWidth(0)
-    draw_text(c, "Primary Contributors to Score", MARGIN + 16, rc_top - 20, 13, FONT_BOLD)
+    draw_text(c, "Primary Contributors to Score", MARGIN + 16, rc_top - 22, 13, FONT_BOLD)
     c.setFont(FONT, 9)
     c.setFillColor(TEXT_MUTED)
-    c.drawString(MARGIN + 16, rc_top - 32,
+    c.drawString(MARGIN + 16, rc_top - 38,
                  "Factors most significantly affecting your cognitive performance")
-    draw_divider(c, MARGIN + 16, rc_top - 38, PAGE_WIDTH - MARGIN * 2 - 32)
+    draw_divider(c, MARGIN + 16, rc_top - 48, PAGE_WIDTH - MARGIN * 2 - 32)
 
     bar_full_w = PAGE_WIDTH - MARGIN * 2 - 200
     
     for ri, cause in enumerate(root_causes):
-        ry = rc_top - 85 - ri * 44  # increased from 36 to 44 — more breathing room
+        ry = rc_top - RC_HEADER_H - ri * RC_ROW_H
 
         # Rank dot — left edge
         dot_col = [DANGER, WARNING, WARNING, PRIMARY][ri] if ri < 4 else TEXT_MUTED
@@ -1271,15 +1463,18 @@ def draw_lifestyle_page(c, data):
         c.circle(MARGIN + 10, ry + 18, 5, fill=1, stroke=0)
 
         # Impact badge
-        c.setFillColor(DANGER_LIGHT)
-        c.roundRect(MARGIN + 22, ry + 8, 42, 20, 6, fill=1, stroke=0)
-        c.setFillColor(DANGER)
-        c.setFont(FONT_BOLD, 9)
-        c.drawCentredString(MARGIN + 43, ry + 16, f"{cause['impact_pct']}%")
+        draw_tag(c, MARGIN + 22, ry + 8, f"{cause['impact_pct']}%",
+                 DANGER_LIGHT, DANGER, width=42, height=20, radius=6,
+                 font_size=9)
 
         # Impact bar geometry (declared first so the text can be bounded by it)
-        bar_x     = PAGE_WIDTH - MARGIN - 140
+        # The value label used to start 4pt past a bar that ended 20pt from the
+        # card edge, so "40%" was drawn touching (and partly over) the border.
+        # The column is now reserved right-to-left from a real inner padding.
+        val_right = PAGE_WIDTH - MARGIN - SPACE_MD
+        val_w     = 30
         bar_w     = 120
+        bar_x     = val_right - val_w - SPACE_XS - bar_w
         text_x    = MARGIN + 72
         # The old width (PAGE_WIDTH - 2*MARGIN - 200 = 315pt) ran 12pt past
         # the bar's left edge, so a full-width line could slide under it.
@@ -1314,10 +1509,12 @@ def draw_lifestyle_page(c, data):
         c.setFillColor(bar_col)
         c.roundRect(bar_x, ry + 12, fill_w, 10, 5, fill=1, stroke=0)
 
-        # Value label right of bar
+        # Value label, right-aligned in its reserved column and centred on the
+        # bar rather than sitting a couple of points below it.
         c.setFont(FONT_BOLD, 8)
         c.setFillColor(bar_col)
-        c.drawString(bar_x + bar_w + 4, ry + 14, f"{cause['impact_pct']}%")
+        c.drawRightString(val_right, centered_baseline(ry + 12, 10, 8),
+                          f"{cause['impact_pct']}%")
 
 # ============================================================
 # PAGE 5 — AI COGNITIVE INSIGHTS
@@ -1339,9 +1536,45 @@ def draw_ai_insights_page(c, data):
     content_top  = PAGE_HEIGHT - 88
 
     # ============================================================
+    # PAGE 5 BUDGET
+    # ============================================================
+    # The outlook cards are the one block whose height is dictated by its data
+    # (one row per at-risk domain), so they are measured first and the insight
+    # cards take what is left. Without this the insight cards grew to fit their
+    # text and pushed the outlook cards down through the footer.
+    # ------------------------------------------------------------
+    BOTTOM5    = 46
+    main_h     = 100
+    proj_card_h = 100
+    PROJ_GAP   = 25            # "Projected Improvement" label + air
+    OUTLOOK_GAP = 28           # "Future Outlook" label + air
+
+    declines_n = len(no_action.get("domain_declines", [])[:3])
+    gains_n    = len(with_action.get("domain_gains", [])[:3])
+    rp_rows    = max(declines_n, gains_n)
+    rp_row_h   = 28                # was 24; each row is a value plus a sub-label
+
+    # Shared vertical rhythm for both outlook cards, as offsets below rp_y.
+    # Previously the projection bands started 4pt under their heading and the
+    # first domain row started 4pt under "Domain Risk", so the headings
+    # visually merged with the content beneath them.
+    RP_BAND_H  = 18
+    RP_OA_OFF  = 44                                  # score heading
+    RP_B1_OFF  = RP_OA_OFF + SPACE_MD + RP_BAND_H    # 30-day band
+    RP_B2_OFF  = RP_B1_OFF + RP_BAND_H + SPACE_XS    # 90-day band
+    RP_SUB_OFF = RP_B2_OFF + SPACE_MD + SPACE_XS     # domain sub-heading
+    RP_ROW_OFF = RP_SUB_OFF + 28                     # first domain row
+    rp_h       = (RP_ROW_OFF + max(0, rp_rows - 1) * rp_row_h
+                  + SPACE_MD + RP_BAND_H + SPACE_MD + SPACE_XS)
+
+    # Height left over for the Behavioural Insights / Potential Causes pair.
+    INS_AVAIL = ((content_top - BOTTOM5)
+                 - (main_h + SPACE_MD + PROJ_GAP + proj_card_h
+                    + OUTLOOK_GAP + rp_h))
+
+    # ============================================================
     # MAIN ANALYSIS CARD
     # ============================================================
-    main_h = 100
     draw_card(c, MARGIN, content_top - main_h,
               PAGE_WIDTH - MARGIN * 2, main_h, radius=16)
 
@@ -1365,53 +1598,60 @@ def draw_ai_insights_page(c, data):
     # ============================================================
     # BEHAVIORAL INSIGHTS + POTENTIAL CAUSES
     # ============================================================
-    section_y = content_top - main_h - 12
+    section_y = content_top - main_h - SPACE_MD
     half_w    = (PAGE_WIDTH - MARGIN * 2 - 12) / 2
-    card_h    = 120
+    # Potential Causes runs long while Behavioral Insights runs short, so the
+    # pair is sized to whichever needs more room instead of a fixed 120pt that
+    # made one overflow and left the other half empty.
+    INS_FONT   = 9
+    INS_LINE_H = 12
+    _ins_items = list(ai["behavioral_insights"][:4])
+    _cau_items = list(ai["potential_causes"][:4])
+
+    def _list_height(items):
+        h = 0.0
+        for it in items:
+            n = len(wrap_lines(c, it, FONT, INS_FONT, half_w - 32 - 14, 3))
+            h += max(1, n) * INS_LINE_H + SPACE_SM
+        return h
+
+    card_h = (HEADING_GAP + SPACE_SM
+              + max(_list_height(_ins_items), _list_height(_cau_items))
+              + SPACE_SM)
+    card_h = clamp(card_h, 108, max(108, INS_AVAIL))
 
     # Behavioral insights
     draw_card(c, MARGIN, section_y - card_h, half_w, card_h, radius=14)
     draw_text(c, "Behavioral Insights",
-              MARGIN + 16, section_y - 16, 11, FONT_BOLD, PRIMARY)
-    draw_divider(c, MARGIN + 16, section_y - 26, half_w - 32)
+              MARGIN + 16, section_y - 18, 11, FONT_BOLD, PRIMARY)
+    draw_divider(c, MARGIN + 16, section_y - 28, half_w - 32)
 
-    for bii, insight in enumerate(ai["behavioral_insights"][:4]):
-        iy = section_y - 46 - bii * 20
-        c.setFillColor(PRIMARY)
-        c.roundRect(MARGIN + 16, iy + 4, 4, 9, 2, fill=1, stroke=0)
-        wrap_text_in_box(
-            c, insight,
-            MARGIN + 28, iy + 12,
-            half_w - 44, 8,
-            line_height=10, max_lines=2,
-            font=FONT, color=TEXT_SECONDARY,
-        )
+    draw_bullet_list(
+        c, _ins_items,
+        MARGIN + 16, section_y - HEADING_GAP - SPACE_XS,
+        half_w - 32, font_size=INS_FONT, line_height=INS_LINE_H,
+        marker_color=PRIMARY, bottom_limit=section_y - card_h + SPACE_SM,
+    )
 
     # Potential causes
     cx2 = MARGIN + half_w + 12
     draw_card(c, cx2, section_y - card_h, half_w, card_h, radius=14)
     draw_text(c, "Potential Causes",
-              cx2 + 16, section_y - 16, 11, FONT_BOLD, WARNING)
-    draw_divider(c, cx2 + 16, section_y - 26, half_w - 32)
+              cx2 + 16, section_y - 18, 11, FONT_BOLD, WARNING)
+    draw_divider(c, cx2 + 16, section_y - 28, half_w - 32)
 
-    for cai, cause in enumerate(ai["potential_causes"][:4]):
-        cy3 = section_y - 46 - cai * 20
-        c.setFillColor(WARNING)
-        c.roundRect(cx2 + 16, cy3 + 4, 4, 9, 2, fill=1, stroke=0)
-        wrap_text_in_box(
-            c, cause,
-            cx2 + 28, cy3 + 12,
-            half_w - 44, 8,
-            line_height=10, max_lines=2,
-            font=FONT, color=TEXT_SECONDARY,
-        )
+    draw_bullet_list(
+        c, _cau_items,
+        cx2 + 16, section_y - HEADING_GAP - SPACE_XS,
+        half_w - 32, font_size=INS_FONT, line_height=INS_LINE_H,
+        marker_color=WARNING, bottom_limit=section_y - card_h + SPACE_SM,
+    )
 
     # ============================================================
     # PROJECTED IMPROVEMENT (30 Days)
     # ============================================================
     proj      = ai["improvement_projection"]
-    proj_y    = section_y - card_h - 25
-    proj_card_h = 110
+    proj_y    = section_y - card_h - PROJ_GAP
     proj_w    = (PAGE_WIDTH - MARGIN * 2 - 20) / 3
 
     draw_text(c, "Projected Improvement (30 Days)",
@@ -1473,17 +1713,9 @@ def draw_ai_insights_page(c, data):
     # ============================================================
     # RISK PREDICTION — TWO CARDS SIDE BY SIDE
     # ============================================================
-    rp_y    = proj_y - proj_card_h -28
+    rp_y    = proj_y - proj_card_h - OUTLOOK_GAP
     rp_half = (PAGE_WIDTH - MARGIN * 2 - 12) / 2
 
-    # Card height is derived from its tallest content. At the old fixed 175pt
-    # the closing statement band was drawn ~33pt BELOW the card, outside its
-    # own boundary, whenever three domain rows were present.
-    declines_n = len(no_action.get("domain_declines", [])[:3])
-    gains_n    = len(with_action.get("domain_gains", [])[:3])
-    rp_rows    = max(declines_n, gains_n)
-    rp_row_h   = 24
-    rp_h       = 122 + rp_rows * rp_row_h + 36
 
     # ---- Row columns (shared by both cards) --------------------------
     # Domain label gets its own measured column and the numbers are
@@ -1509,45 +1741,43 @@ def draw_ai_insights_page(c, data):
     c.drawCentredString(MARGIN + rp_half / 2, rp_y - 14, "⚠  WITHOUT ACTION")
 
     # Overall score projections
-    oa_y = rp_y - 40
+    oa_y = rp_y - RP_OA_OFF
     c.setFont(FONT_BOLD, 9)
     c.setFillColor(TEXT_PRIMARY)
     c.drawString(MARGIN + 12, oa_y, "Overall Score Projection")
-    # 30 day
-    c.setFillColor(DANGER_LIGHT)
-    c.roundRect(MARGIN + 12, oa_y - 22, rp_half - 24, 18, 5, fill=1, stroke=0)
-    c.setFont(FONT, 8)
-    c.setFillColor(TEXT_SECONDARY)
-    c.drawString(MARGIN + 18, oa_y - 13, "30 days:")
-    c.setFont(FONT_BOLD, 9)
-    c.setFillColor(DANGER)
-    no_30 = no_action.get("overall_30_days", 0)
+
     overall_now = data["overall_score"]
+    no_30   = no_action.get("overall_30_days", 0)
+    no_90   = no_action.get("overall_90_days", 0)
     drop_30 = round(overall_now - no_30, 1)
-    c.drawString(MARGIN + 60, oa_y - 13,
-                 f"{no_30}  (−{drop_30} pts / −{round(drop_30/max(overall_now,1)*100,1)}%)")
-    # 90 day
-    c.setFillColor(DANGER_LIGHT)
-    c.roundRect(MARGIN + 12, oa_y - 44, rp_half - 24, 18, 5, fill=1, stroke=0)
-    c.setFont(FONT, 8)
-    c.setFillColor(TEXT_SECONDARY)
-    c.drawString(MARGIN + 18, oa_y - 35, "90 days:")
-    c.setFont(FONT_BOLD, 9)
-    c.setFillColor(DANGER)
-    no_90  = no_action.get("overall_90_days", 0)
     drop_90 = round(overall_now - no_90, 1)
-    c.drawString(MARGIN + 60, oa_y - 35,
-                 f"{no_90}  (−{drop_90} pts / −{round(drop_90/max(overall_now,1)*100,1)}%)")
+
+    for band_off, lbl, val in (
+        (RP_B1_OFF, "30 days:",
+         f"{no_30}  (−{drop_30} pts / −{round(drop_30/max(overall_now,1)*100,1)}%)"),
+        (RP_B2_OFF, "90 days:",
+         f"{no_90}  (−{drop_90} pts / −{round(drop_90/max(overall_now,1)*100,1)}%)"),
+    ):
+        band_y = rp_y - band_off
+        c.setFillColor(DANGER_LIGHT)
+        c.roundRect(MARGIN + 12, band_y, rp_half - 24, RP_BAND_H, 5, fill=1, stroke=0)
+        base = centered_baseline(band_y, RP_BAND_H, 8.5)
+        c.setFont(FONT, 8)
+        c.setFillColor(TEXT_SECONDARY)
+        c.drawString(MARGIN + 18, base, lbl)
+        c.setFont(FONT_BOLD, 9)
+        c.setFillColor(DANGER)
+        c.drawString(MARGIN + 60, base, val)
 
     # Domain declines
     declines = no_action.get("domain_declines", [])
-    dl_y = oa_y - 58
+    dl_y = rp_y - RP_SUB_OFF
     c.setFont(FONT_BOLD, 8)
     c.setFillColor(TEXT_PRIMARY)
     c.drawString(MARGIN + 12, dl_y, "Domain Risk")
 
     for di, dec in enumerate(declines[:3]):
-        dy = dl_y - 18 - di * 24
+        dy = rp_y - RP_ROW_OFF - di * rp_row_h
         cur_v  = dec["current"]
         proj_v = dec["projected"]
         pct_v  = dec["decline_pct"]
@@ -1577,7 +1807,7 @@ def draw_ai_insights_page(c, data):
 
     # Burnout statement
     # Anchored to the capped row count so the band stays inside the card.
-    bs_y = dl_y - 18 - rp_rows * rp_row_h - 8
+    bs_y = (rp_y - RP_ROW_OFF - max(0, rp_rows - 1) * rp_row_h) - SPACE_MD
     c.setFillColor(WARNING_LIGHT)
     c.roundRect(MARGIN + 12, bs_y - 14, rp_half - 24, 18, 5, fill=1, stroke=0)
     c.setFont(FONT, 7.5)
@@ -1604,46 +1834,42 @@ def draw_ai_insights_page(c, data):
                         "✓  WITH RECOMMENDATIONS")
 
     # Overall score projections
-    wa_y = rp_y - 40
+    wa_y = rp_y - RP_OA_OFF
     c.setFont(FONT_BOLD, 9)
     c.setFillColor(TEXT_PRIMARY)
     c.drawString(rx2 + 12, wa_y, "Expected Score")
 
-    # 30 day
-    c.setFillColor(SUCCESS_LIGHT)
-    c.roundRect(rx2 + 12, wa_y - 22, rp_half - 24, 18, 5, fill=1, stroke=0)
-    c.setFont(FONT, 8)
-    c.setFillColor(TEXT_SECONDARY)
-    c.drawString(rx2 + 18, wa_y - 13, "30 days:")
     wa_30   = with_action.get("overall_30_days", 0)
-    gain_30 = round(wa_30 - overall_now, 1)
-    c.setFont(FONT_BOLD, 9)
-    c.setFillColor(SUCCESS)
-    c.drawString(rx2 + 60, wa_y - 13,
-                 f"{wa_30}  (+{gain_30} pts / +{round(gain_30/max(overall_now,1)*100,1)}%)")
-
-    # 90 day
-    c.setFillColor(SUCCESS_LIGHT)
-    c.roundRect(rx2 + 12, wa_y - 44, rp_half - 24, 18, 5, fill=1, stroke=0)
-    c.setFont(FONT, 8)
-    c.setFillColor(TEXT_SECONDARY)
-    c.drawString(rx2 + 18, wa_y - 35, "90 days:")
     wa_90   = with_action.get("overall_90_days", 0)
+    gain_30 = round(wa_30 - overall_now, 1)
     gain_90 = round(wa_90 - overall_now, 1)
-    c.setFont(FONT_BOLD, 9)
-    c.setFillColor(SUCCESS)
-    c.drawString(rx2 + 60, wa_y - 35,
-                 f"{wa_90}  (+{gain_90} pts / +{round(gain_90/max(overall_now,1)*100,1)}%)")
+
+    for band_off, lbl, val in (
+        (RP_B1_OFF, "30 days:",
+         f"{wa_30}  (+{gain_30} pts / +{round(gain_30/max(overall_now,1)*100,1)}%)"),
+        (RP_B2_OFF, "90 days:",
+         f"{wa_90}  (+{gain_90} pts / +{round(gain_90/max(overall_now,1)*100,1)}%)"),
+    ):
+        band_y = rp_y - band_off
+        c.setFillColor(SUCCESS_LIGHT)
+        c.roundRect(rx2 + 12, band_y, rp_half - 24, RP_BAND_H, 5, fill=1, stroke=0)
+        base = centered_baseline(band_y, RP_BAND_H, 8.5)
+        c.setFont(FONT, 8)
+        c.setFillColor(TEXT_SECONDARY)
+        c.drawString(rx2 + 18, base, lbl)
+        c.setFont(FONT_BOLD, 9)
+        c.setFillColor(SUCCESS)
+        c.drawString(rx2 + 60, base, val)
 
     # Domain gains
     gains  = with_action.get("domain_gains", [])
-    ga_y   = wa_y - 58
+    ga_y   = rp_y - RP_SUB_OFF
     c.setFont(FONT_BOLD, 8)
     c.setFillColor(TEXT_PRIMARY)
     c.drawString(rx2 + 12, ga_y, "Highest Improvement Potential")
 
     for gi, gain_item in enumerate(gains[:3]):
-        gy      = ga_y - 18 - gi * 24
+        gy      = rp_y - RP_ROW_OFF - gi * rp_row_h
         cur_v   = gain_item["current"]
         p30     = gain_item["projected_30"]
         p90     = gain_item["projected_90"]
@@ -1674,7 +1900,7 @@ def draw_ai_insights_page(c, data):
 
     # Motivational footer inside card
     # Anchored to the capped row count so the band stays inside the card.
-    mf_y = ga_y - 18 - rp_rows * rp_row_h - 8
+    mf_y = (rp_y - RP_ROW_OFF - max(0, rp_rows - 1) * rp_row_h) - SPACE_MD
     c.setFillColor(SUCCESS_LIGHT)
     c.roundRect(rx2 + 12, mf_y - 14, rp_half - 24, 18, 5, fill=1, stroke=0)
     c.setFont(FONT_BOLD, 7.5)
@@ -1775,8 +2001,20 @@ def draw_strengths_page(c, data):
 
     strengths   = data["strengths"]
     content_top = PAGE_HEIGHT - 88
-    card_h      = 110
-    gap         = 12
+
+    # ------------------------------------------------------------
+    # Page 7 budget. The card height is what the card's own content needs
+    # (badge, title, description, bar, status tag, plus a real bottom pad);
+    # the ~180pt that was left blank at the foot of the page is then shared
+    # between the cards as separation instead of being wasted.
+    # ------------------------------------------------------------
+    ST_CARDS_TOP = content_top - 74
+    ST_CHART_H   = 148
+    card_h       = 128
+    _n_str       = max(1, len(strengths))
+    _avail       = ST_CARDS_TOP - (ST_CHART_H + SPACE_LG + 44)
+    gap          = clamp((_avail - _n_str * card_h) / max(1, _n_str - 1),
+                         SPACE_MD, 30)
 
     # Intro card
     draw_card(c, MARGIN, content_top - 56,
@@ -1806,11 +2044,9 @@ def draw_strengths_page(c, data):
         # ── BADGE PILL ──
         badge_text  = f"{strength.get('icon','★')}  {strength.get('badge', strength['title'])}"
         badge_w     = c.stringWidth(badge_text, FONT_BOLD, 9) + 20
-        c.setFillColor(score_color_light(strength["score"]))
-        c.roundRect(MARGIN + 56, sy - 24, badge_w, 18, 8, fill=1, stroke=0)
-        c.setFillColor(rc)
-        c.setFont(FONT_BOLD, 9)
-        c.drawCentredString(MARGIN + 56 + badge_w / 2, sy - 17, badge_text)
+        draw_tag(c, MARGIN + 56, sy - 24, badge_text,
+                 score_color_light(strength["score"]), rc,
+                 width=badge_w, height=18, radius=8)
 
         # Domain title (smaller, below badge)
         c.setFont(FONT, 9)
@@ -1834,7 +2070,7 @@ def draw_strengths_page(c, data):
                          line_height=13, max_lines=2)
 
         # Progress bar with pip markers
-        bar_y3 = sy - card_h + 25
+        bar_y3 = sy - 88
         draw_progress_bar(c, MARGIN + 56, bar_y3,
                           PAGE_WIDTH - MARGIN * 2 - 70, 10, strength["score"])
         for pip_val in [25, 50, 70, 85]:
@@ -1842,14 +2078,16 @@ def draw_strengths_page(c, data):
             c.setFillColor(BACKGROUND)
             c.circle(pip_x, bar_y3 + 5, 2, fill=1, stroke=0)
 
-        # Status tag
-        draw_tag(c, MARGIN + 56, sy - card_h + 6,
-                 score_status(strength["score"]), rc, height=13, radius=5)
+        # Status tag. It used to sit 6pt off the card's bottom edge in a 13pt
+        # pill; it now keeps a full pad below it and has room around the label.
+        draw_tag(c, MARGIN + 56, sy - 112,
+                 score_status(strength["score"]), rc, height=18, radius=9)
 
     # Strength distribution bar chart across all seven scales
     all_domains = data["radar_domains"]
-    chart_y     = content_top - 74 - len(strengths) * (card_h + gap) - 16
-    chart_h     = 148
+    chart_y     = (ST_CARDS_TOP - _n_str * card_h - (_n_str - 1) * gap
+                   - SPACE_LG)
+    chart_h     = ST_CHART_H
 
     if chart_y - chart_h > 44:
         draw_card(c, MARGIN, chart_y - chart_h,
@@ -1905,8 +2143,18 @@ def draw_roadmap_page(c, data):
 
     roadmap = data["roadmap"]
     content_top = PAGE_HEIGHT - 88
-    card_h = 118
-    gap = 10
+
+    # ------------------------------------------------------------
+    # Page 8 budget. Roughly 250pt sat unused below the last week while task
+    # text was being hard-truncated at 28 characters ("Build in micro-recovery
+    # m..."). The cards now take that height so each task can wrap and be read
+    # in full.
+    # ------------------------------------------------------------
+    RM_BOTTOM   = 44
+    _n_weeks    = max(1, len(roadmap))
+    gap         = SPACE_MD
+    card_h      = clamp(((content_top - 20 - RM_BOTTOM)
+                         - (_n_weeks - 1) * gap) / _n_weeks, 118, 168)
 
     # Timeline line
     line_x = MARGIN + 36
@@ -1954,24 +2202,39 @@ def draw_roadmap_page(c, data):
         # Tasks
         tasks = week_data["tasks"]
         task_col_w = (cw - 28) / 3
+
+        # The task boxes fill the space between the focus heading and the
+        # milestone badge, so the text wraps instead of being cut at 28 chars.
+        TASK_FONT   = 9
+        TASK_LINE_H = 11
+        ms_y        = wy - card_h + 12
+        task_top    = wy - 48
+        task_bot    = ms_y + 20 + SPACE_MD
+        task_box_h  = max(34, task_top - task_bot)
+        task_lines  = max(1, int((task_box_h - 14) / TASK_LINE_H))
+
         for ti, task in enumerate(tasks[:3]):
             tx = cx + 14 + ti * task_col_w
-            ty = wy - 52
 
             # Task box
             c.setFillColor(SURFACE)
-            c.roundRect(tx, ty - 30, task_col_w - 8, 34, 6, fill=1, stroke=0)
+            c.roundRect(tx, task_top - task_box_h, task_col_w - 8, task_box_h,
+                        6, fill=1, stroke=0)
 
-            # Checkbox
+            first_baseline = task_top - 14
+            text_w = task_col_w - 8 - 24 - 8
+
+            # Checkbox, centred on the first line of its task rather than
+            # floating below it.
+            box_cy = text_center_y(first_baseline, TASK_FONT)
             c.setStrokeColor(BORDER_COLOR)
             c.setLineWidth(1)
-            c.roundRect(tx + 8, ty - 14, 12, 12, 3, fill=0, stroke=1)
+            c.roundRect(tx + 8, box_cy - 6, 12, 12, 3, fill=0, stroke=1)
 
-            c.setFont(FONT, 9)
-            c.setFillColor(TEXT_SECONDARY)
-            # Truncate task text
-            task_display = task if len(task) <= 28 else task[:25] + "..."
-            c.drawString(tx + 24, ty - 8, task_display)
+            wrap_text_in_box(c, task, tx + 24, first_baseline, text_w,
+                             TASK_FONT, line_height=TASK_LINE_H,
+                             max_lines=task_lines,
+                             font=FONT, color=TEXT_SECONDARY)
 
         # Milestone badge
         milestones = [
@@ -1981,11 +2244,9 @@ def draw_roadmap_page(c, data):
             "Optimization & Review",
         ]
         ml = milestones[wi] if wi < len(milestones) else ""
-        c.setFillColor(score_color_light(50 + wi * 10))
-        c.roundRect(cx + cw - 130, wy - card_h + 10, 116, 20, 8, fill=1, stroke=0)
-        c.setFillColor(wc)
-        c.setFont(FONT, 8)
-        c.drawCentredString(cx + cw - 72, wy - card_h + 18, f"✦  {ml}")
+        draw_tag(c, cx + cw - 130, ms_y, f"✦  {ml}",
+                 score_color_light(50 + wi * 10), wc,
+                 width=116, height=20, radius=8, font_size=8)
 
 
 # ============================================================
@@ -2367,11 +2628,8 @@ def draw_methodology_page(c, data, page_num):
 # TEXT WRAPPING HELPER
 # ============================================================
 
-def wrap_text_in_box(c, text, x, y, width, font_size, line_height=14,
-                     max_lines=999, font=FONT, color=TEXT_SECONDARY):
-    """Simple word-wrap within a fixed width."""
-    c.setFont(font, font_size)
-    c.setFillColor(color)
+def wrap_lines(c, text, font, font_size, width, max_lines=999):
+    """Word-wrap `text` to `width`, returning at most `max_lines` lines."""
     words = text.split()
     line = ""
     lines = []
@@ -2385,8 +2643,48 @@ def wrap_text_in_box(c, text, x, y, width, font_size, line_height=14,
             line = word
     if line:
         lines.append(line)
-    for li, ln in enumerate(lines[:max_lines]):
+    return lines[:max_lines]
+
+
+def wrap_text_in_box(c, text, x, y, width, font_size, line_height=14,
+                     max_lines=999, font=FONT, color=TEXT_SECONDARY):
+    """Simple word-wrap within a fixed width."""
+    c.setFont(font, font_size)
+    c.setFillColor(color)
+    for li, ln in enumerate(wrap_lines(c, text, font, font_size, width, max_lines)):
         c.drawString(x, y - li * line_height, ln)
+
+
+def draw_bullet_list(c, items, x, y_top, width, font_size=9, line_height=12,
+                     item_gap=SPACE_SM, marker_color=PRIMARY,
+                     text_color=TEXT_SECONDARY, font=FONT, max_lines=3,
+                     indent=14, bottom_limit=None):
+    """Bulleted list whose marker is centred on its first line of text.
+
+    Two problems this replaces: markers were drawn at a fixed offset below the
+    baseline, so they floated under their sentence rather than beside it; and
+    every item was allotted the same fixed pitch no matter how many lines it
+    wrapped to, so a two-line item ran into the next bullet.
+
+    Returns the y just below the last item drawn.
+    """
+    y = y_top
+    for item in items:
+        lines = wrap_lines(c, item, font, font_size, width - indent, max_lines)
+        if not lines:
+            continue
+        block_h = (len(lines) - 1) * line_height
+        if bottom_limit is not None and (y - block_h) < bottom_limit:
+            break
+        marker_cy = text_center_y(y, font_size)
+        c.setFillColor(marker_color)
+        c.roundRect(x, marker_cy - 4.5, 3.5, 9, 1.75, fill=1, stroke=0)
+        c.setFont(font, font_size)
+        c.setFillColor(text_color)
+        for li, ln in enumerate(lines):
+            c.drawString(x + indent, y - li * line_height, ln)
+        y -= block_h + line_height + item_gap
+    return y
 
 
 # ============================================================
